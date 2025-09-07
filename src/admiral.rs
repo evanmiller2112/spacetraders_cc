@@ -1,6 +1,7 @@
 // Admiral module - High-level autonomous game loop orchestration
 use crate::client::SpaceTradersClient;
 use crate::models::Ship;
+use std::collections::HashMap;
 use std::fs;
 
 pub struct Admiral {
@@ -130,6 +131,50 @@ impl Admiral {
         Ok(())
     }
     
+    pub async fn debug_waypoints(&self, system_symbol: &str) -> Result<(), Box<dyn std::error::Error>> {
+        println!("🔍 DEBUG: Analyzing waypoints in system {}...", system_symbol);
+        
+        let waypoints = self.client.get_system_waypoints(system_symbol, None).await?;
+        
+        println!("📍 Found {} total waypoints:", waypoints.len());
+        
+        // Group by type
+        let mut type_counts = std::collections::HashMap::new();
+        
+        for (i, waypoint) in waypoints.iter().enumerate() {
+            if i < 10 { // Show first 10 waypoints in detail
+                println!("\n{}. {} (Type: {})", i + 1, waypoint.symbol, waypoint.waypoint_type);
+                println!("   Coordinates: ({}, {})", waypoint.x, waypoint.y);
+                println!("   Traits: {:?}", waypoint.traits.iter().map(|t| &t.name).collect::<Vec<_>>());
+            }
+            
+            *type_counts.entry(&waypoint.waypoint_type).or_insert(0) += 1;
+        }
+        
+        println!("\n📊 Waypoint Types Summary:");
+        for (waypoint_type, count) in type_counts {
+            println!("   {}: {} waypoints", waypoint_type, count);
+        }
+        
+        // Specifically look for asteroid-related waypoints
+        let asteroid_candidates: Vec<_> = waypoints.iter()
+            .filter(|w| w.waypoint_type.contains("ASTEROID") || 
+                       w.traits.iter().any(|t| t.name.to_lowercase().contains("mineral") || 
+                                             t.name.to_lowercase().contains("mining") ||
+                                             t.name.to_lowercase().contains("ore")))
+            .collect();
+            
+        println!("\n🗿 Mining/Asteroid Candidates: {} found", asteroid_candidates.len());
+        for candidate in asteroid_candidates {
+            println!("   {} (Type: {}) - Traits: {:?}", 
+                    candidate.symbol, 
+                    candidate.waypoint_type,
+                    candidate.traits.iter().map(|t| &t.name).collect::<Vec<_>>());
+        }
+        
+        Ok(())
+    }
+
     pub async fn debug_contracts(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("🔍 DEBUG: Analyzing current contract status...");
         

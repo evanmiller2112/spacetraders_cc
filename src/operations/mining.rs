@@ -39,7 +39,8 @@ impl<'a> MiningOperations<'a> {
         let all_waypoints = self.client.get_system_waypoints(system_symbol, None).await?;
         let all_asteroids: Vec<Waypoint> = all_waypoints
             .into_iter()
-            .filter(|waypoint| waypoint.waypoint_type == "ASTEROID_FIELD")
+            .filter(|waypoint| waypoint.waypoint_type == "ASTEROID" || 
+                             waypoint.waypoint_type == "ENGINEERED_ASTEROID")
             .collect();
 
         println!("📍 Found {} total asteroid field(s):", all_asteroids.len());
@@ -79,17 +80,32 @@ impl<'a> MiningOperations<'a> {
             let description = trait_info.description.to_lowercase();
             let trait_name = trait_info.name.to_lowercase();
             
+            // High priority scoring for known mining traits
+            if trait_name.contains("common metal deposits") {
+                current_score += 100; // Common Metal Deposits is great for ALUMINUM_ORE
+            }
+            
+            if trait_name.contains("mineral deposits") {
+                current_score += 120; // Mineral Deposits even better for aluminum ore
+            }
+            
             // High priority for aluminum ore contracts
             if needed_materials.contains(&"ALUMINUM_ORE".to_string()) {
-                if description.contains("aluminum") || description.contains("metal ore")
-                   || trait_name.contains("mineral") || trait_name.contains("rich") {
-                    current_score += 100;
+                if description.contains("aluminum") || description.contains("metal") || 
+                   trait_name.contains("metal") || trait_name.contains("mineral") {
+                    current_score += 80;
                 }
             }
             
-            // General mineral/ore indicators
-            if description.contains("mineral") || description.contains("ore") || description.contains("metal") {
+            // General mineral/ore indicators in descriptions
+            if description.contains("mineral") || description.contains("ore") || 
+               description.contains("metal") || description.contains("deposits") {
                 current_score += 50;
+            }
+            
+            // Avoid problematic traits
+            if trait_name.contains("stripped") || trait_name.contains("hollowed") {
+                current_score -= 20; // These might be depleted or harder to mine
             }
             
             // Specific material matches
@@ -100,7 +116,8 @@ impl<'a> MiningOperations<'a> {
             }
         }
         
-        current_score
+        // Base score for any asteroid (they all have some mining potential)
+        current_score.max(50)
     }
 
     pub async fn execute_parallel_survey_mining(
@@ -158,7 +175,7 @@ impl<'a> MiningOperations<'a> {
                             asteroid_surveys.extend(survey_data.surveys);
                             
                             // Small delay for survey cooldown
-                            if survey_data.cooldown.remaining_seconds > 0 {
+                            if survey_data.cooldown.remaining_seconds > 0.0 {
                                 sleep(Duration::from_secs((survey_data.cooldown.remaining_seconds as u64).min(10))).await;
                             }
                         }

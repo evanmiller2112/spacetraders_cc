@@ -62,10 +62,73 @@ impl<'a> FleetOperations<'a> {
             println!("  📍 {} → {}", ship.symbol, target_asteroid.symbol);
         }
         
-        // Navigate all ships to their assigned positions
+        // Navigate all ships to their assigned positions with fuel management
         for (ship, target_asteroid) in &target_assignments {
             if ship.nav.waypoint_symbol != target_asteroid.symbol {
                 println!("🧭 Navigating {} to {}...", ship.symbol, target_asteroid.symbol);
+                
+                // Check fuel before navigation
+                println!("  ⛽ Current fuel: {}/{}", ship.fuel.current, ship.fuel.capacity);
+                
+                // Always refuel if fuel is below 90% to ensure successful navigation
+                let fuel_safety_threshold = (ship.fuel.capacity as f64 * 0.9) as i32;
+                if ship.fuel.current < fuel_safety_threshold {
+                    println!("  ⚠️ Low fuel detected ({} < {} safety threshold). Attempting to refuel...", 
+                            ship.fuel.current, fuel_safety_threshold);
+                    
+                    // Dock if not already docked for refueling
+                    if ship.nav.status != "DOCKED" {
+                        match self.ship_ops.dock(&ship.symbol).await {
+                            Ok(_) => println!("    🛸 {} docked for refueling", ship.symbol),
+                            Err(e) => {
+                                eprintln!("    ❌ Could not dock {} for refueling: {}", ship.symbol, e);
+                                continue;
+                            }
+                        }
+                    }
+                    
+                    // Refuel ship at current location
+                    match self.ship_ops.refuel(&ship.symbol).await {
+                        Ok(refuel_data) => {
+                            println!("    ⛽ {} refueled! Fuel: {}/{} (Cost: {} credits)", 
+                                    ship.symbol,
+                                    refuel_data.fuel.current, 
+                                    refuel_data.fuel.capacity,
+                                    refuel_data.transaction.total_price);
+                        }
+                        Err(e) => {
+                            eprintln!("    ⚠️ Could not refuel {}: {}", ship.symbol, e);
+                            println!("    💡 Current location may not offer refueling services");
+                            println!("    🚀 Attempting to navigate to fuel station X1-SG75-B6...");
+                            
+                            // Try to go to the fuel station first
+                            match self.ship_ops.orbit(&ship.symbol).await {
+                                Ok(_) => {},
+                                Err(e) => println!("    ⚠️ Could not orbit: {}", e),
+                            }
+                            
+                            match self.ship_ops.navigate(&ship.symbol, "X1-SG75-B6").await {
+                                Ok(_) => {
+                                    println!("    ✅ Navigating to fuel station");
+                                    // Wait a bit for arrival
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                                    
+                                    // Dock and try to refuel at fuel station
+                                    if let Ok(_) = self.ship_ops.dock(&ship.symbol).await {
+                                        if let Ok(refuel_data) = self.ship_ops.refuel(&ship.symbol).await {
+                                            println!("    ⛽ {} refueled at fuel station! Fuel: {}/{}", 
+                                                    ship.symbol, refuel_data.fuel.current, refuel_data.fuel.capacity);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("    ❌ Could not navigate to fuel station: {}", e);
+                                    println!("    💡 Continuing with current fuel - may cause navigation issues");
+                                }
+                            }
+                        }
+                    }
+                }
                 
                 // Put ship in orbit if docked
                 if ship.nav.status == "DOCKED" {
@@ -86,6 +149,7 @@ impl<'a> FleetOperations<'a> {
                     }
                     Err(e) => {
                         eprintln!("  ❌ {} navigation failed: {}", ship.symbol, e);
+                        println!("  💡 This may be due to insufficient fuel or other navigation constraints");
                     }
                 }
             } else {

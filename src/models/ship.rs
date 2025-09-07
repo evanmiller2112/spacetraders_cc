@@ -71,8 +71,8 @@ pub struct ShipFrame {
     pub symbol: String,
     pub name: String,
     pub description: String,
-    pub condition: Option<i32>,
-    pub integrity: Option<i32>,
+    pub condition: Option<f64>,
+    pub integrity: Option<f64>,
     #[serde(rename = "moduleSlots")]
     pub module_slots: i32,
     #[serde(rename = "mountingPoints")]
@@ -114,9 +114,9 @@ pub struct ShipCooldown {
     #[serde(rename = "shipSymbol")]
     pub ship_symbol: String,
     #[serde(rename = "totalSeconds")]
-    pub total_seconds: i32,
+    pub total_seconds: f64,
     #[serde(rename = "remainingSeconds")]
-    pub remaining_seconds: i32,
+    pub remaining_seconds: f64,
     pub expiration: Option<String>,
 }
 
