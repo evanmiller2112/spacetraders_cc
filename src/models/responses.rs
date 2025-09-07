@@ -1,0 +1,97 @@
+use serde::{Deserialize, Serialize};
+
+// API Response wrappers
+#[derive(Debug, Deserialize)]
+pub struct AgentResponse {
+    pub data: crate::models::Agent,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WaypointResponse {
+    pub data: crate::models::Waypoint,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WaypointsResponse {
+    pub data: Vec<crate::models::Waypoint>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContractsResponse {
+    pub data: Vec<crate::models::Contract>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContractAcceptResponse {
+    pub data: crate::models::ContractAcceptData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShipsResponse {
+    pub data: Vec<crate::models::Ship>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NavigationResponse {
+    pub data: crate::models::NavigationData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrbitResponse {
+    pub data: OrbitData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrbitData {
+    pub nav: crate::models::ShipNav,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DockResponse {
+    pub data: DockData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DockData {
+    pub nav: crate::models::ShipNav,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtractionResponse {
+    pub data: crate::models::ExtractionData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SurveyResponse {
+    pub data: crate::models::SurveyData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SellCargoResponse {
+    pub data: crate::models::SellCargoData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeliverCargoResponse {
+    pub data: crate::models::DeliverCargoData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FulfillContractResponse {
+    pub data: crate::models::FulfillContractData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefuelResponse {
+    pub data: crate::models::RefuelData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShipyardResponse {
+    pub data: crate::models::Shipyard,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShipPurchaseResponse {
+    pub data: crate::models::ShipPurchaseData,
+}
