@@ -33,22 +33,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     
     println!("\n🎖️  Admiral ready for autonomous operations!");
-    println!("Choose operation mode:");
-    println!("  1. Single autonomous cycle (default)");
-    println!("  2. Continuous autonomous operations (runs forever)");
+    println!("🚀 Starting CONTINUOUS autonomous operations...");
+    println!("⚠️  This will run indefinitely - Press Ctrl+C to stop");
+    println!("🎯 PRIME DIRECTIVE: 100% autonomous gameplay - no user interaction required");
     
-    // For now, run single cycle - could be enhanced with command line args
-    println!("\n🎖️  Starting single autonomous cycle...");
-    
-    match admiral.run_autonomous_cycle().await {
+    match admiral.run_continuous_operations().await {
         Ok(()) => {
-            println!("\n🎉 AUTONOMOUS OPERATIONS COMPLETED SUCCESSFULLY!");
-            println!("🎖️  Admiral reporting: Mission accomplished!");
-            println!("💡 To run continuous operations, modify main.rs or add command line options");
+            println!("\n🎉 AUTONOMOUS OPERATIONS COMPLETED!");
+            println!("🎖️  Admiral reporting: Operations terminated by user");
         }
         Err(e) => {
             eprintln!("\n❌ Autonomous operations failed: {}", e);
-            eprintln!("🎖️  Admiral reporting: Mission incomplete - retry recommended");
+            eprintln!("🎖️  Admiral reporting: Mission incomplete - system error");
             return Err(e);
         }
     }

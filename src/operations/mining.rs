@@ -137,6 +137,7 @@ impl<'a> MiningOperations<'a> {
         
         let mut mining_cycles = 0;
         let mut fleet_surveys: HashMap<String, Vec<Survey>> = HashMap::new();
+        let mut max_cooldown_seconds: f64 = 0.0;
         
         while mining_cycles < max_cycles {
             mining_cycles += 1;
@@ -188,6 +189,7 @@ impl<'a> MiningOperations<'a> {
             
             // Phase 2: PARALLEL Extraction for all ships
             println!("⛏️ Executing parallel extraction across fleet...");
+            max_cooldown_seconds = 0.0; // Reset for this cycle
             
             for (ship, asteroid) in ready_miners {
                 println!("  ⛏️ {} extracting at {}...", ship.symbol, asteroid.symbol);
@@ -211,9 +213,16 @@ impl<'a> MiningOperations<'a> {
                 match extraction_result {
                     Ok(extraction_data) => {
                         let yield_info = &extraction_data.extraction.extraction_yield;
+                        let cooldown_seconds = extraction_data.cooldown.remaining_seconds;
+                        
                         println!("    ✅ {} extracted: {} x{} (Cargo: {}/{})",
                                 ship.symbol, yield_info.symbol, yield_info.units,
                                 extraction_data.cargo.units, extraction_data.cargo.capacity);
+                        
+                        if cooldown_seconds > 0.0 {
+                            println!("      ⏳ {} cooldown: {:.1} seconds", ship.symbol, cooldown_seconds);
+                            max_cooldown_seconds = max_cooldown_seconds.max(cooldown_seconds);
+                        }
                         
                         // Check contract progress
                         if needed_materials.contains(&yield_info.symbol) {
@@ -240,6 +249,16 @@ impl<'a> MiningOperations<'a> {
                     }
                     Err(e) => {
                         println!("    ❌ {} extraction failed: {}", ship.symbol, e);
+                        
+                        // Try to extract cooldown from 409 Conflict errors
+                        let error_str = e.to_string();
+                        if error_str.contains("cooldown for") && error_str.contains("second(s)") {
+                            // Extract cooldown seconds from error message
+                            if let Some(cooldown_match) = extract_cooldown_from_error(&error_str) {
+                                println!("    ⏳ {} cooldown detected from error: {:.1} seconds", ship.symbol, cooldown_match);
+                                max_cooldown_seconds = max_cooldown_seconds.max(cooldown_match);
+                            }
+                        }
                     }
                 }
                 
@@ -247,9 +266,16 @@ impl<'a> MiningOperations<'a> {
                 sleep(Duration::from_secs(1)).await;
             }
             
-            // Cooldown management for all ships
-            println!("⏳ Fleet cooldown management (60 seconds)...");
-            sleep(Duration::from_secs(60)).await;
+            // Dynamic cooldown management based on actual API response
+            if max_cooldown_seconds > 0.0 {
+                let wait_seconds = (max_cooldown_seconds as u64).min(120); // Cap at 2 minutes for safety
+                println!("⏳ Fleet cooldown management ({:.1} seconds from API response)...", max_cooldown_seconds);
+                sleep(Duration::from_secs(wait_seconds)).await;
+            } else {
+                // Fallback to short wait if no cooldown detected
+                println!("⏳ Brief pause (no cooldown detected, 5 second wait)...");
+                sleep(Duration::from_secs(5)).await;
+            }
             
             // Check fleet status
             match self.client.get_ships().await {
@@ -298,4 +324,19 @@ impl<'a> MiningOperations<'a> {
         
         Ok(())
     }
+}
+
+// Helper function to extract cooldown seconds from error messages
+fn extract_cooldown_from_error(error_str: &str) -> Option<f64> {
+    // Look for pattern like "cooldown for 27 second(s)"
+    if let Some(start) = error_str.find("cooldown for ") {
+        let after_cooldown = &error_str[start + 13..]; // Skip "cooldown for "
+        if let Some(end) = after_cooldown.find(" second") {
+            let number_str = &after_cooldown[..end];
+            if let Ok(seconds) = number_str.parse::<f64>() {
+                return Some(seconds);
+            }
+        }
+    }
+    None
 }

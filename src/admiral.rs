@@ -221,27 +221,62 @@ impl Admiral {
     pub async fn run_continuous_operations(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("🎖️  Admiral starting CONTINUOUS autonomous operations...");
         println!("⚠️  This will run indefinitely - Press Ctrl+C to stop");
+        println!("🌟 SpaceTraders Autonomous Agent v0.1.1 - Fully Autonomous Gameplay");
         
         let mut cycle_count = 0;
         
-        loop {
-            cycle_count += 1;
-            println!("\n🔄 ═══════ AUTONOMOUS CYCLE #{} ═══════", cycle_count);
-            
-            match self.run_autonomous_cycle().await {
-                Ok(()) => {
-                    println!("✅ Cycle #{} completed successfully", cycle_count);
+        // Setup Ctrl+C handler
+        let ctrl_c = async {
+            tokio::signal::ctrl_c().await.expect("Failed to install Ctrl+C handler");
+        };
+        
+        let operations = async {
+            loop {
+                cycle_count += 1;
+                println!("\n🔄 ═══════ AUTONOMOUS CYCLE #{} ═══════", cycle_count);
+                
+                match self.run_autonomous_cycle().await {
+                    Ok(()) => {
+                        println!("✅ Cycle #{} completed successfully", cycle_count);
+                        println!("💰 Agent continuing autonomous operations...");
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Cycle #{} failed: {}", cycle_count, e);
+                        eprintln!("⏳ Waiting 60 seconds before retry...");
+                        
+                        // Check for Ctrl+C during error recovery delay
+                        tokio::select! {
+                            _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {},
+                            _ = tokio::signal::ctrl_c() => {
+                                println!("\n⚠️  Ctrl+C received during error recovery. Shutting down...");
+                                return Ok::<(), Box<dyn std::error::Error>>(());
+                            }
+                        }
+                    }
                 }
-                Err(e) => {
-                    eprintln!("❌ Cycle #{} failed: {}", cycle_count, e);
-                    eprintln!("⏳ Waiting 60 seconds before retry...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                
+                // Brief pause between cycles with Ctrl+C handling
+                println!("⏳ Cycle complete. Waiting 30 seconds before next cycle...");
+                
+                tokio::select! {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {},
+                    _ = tokio::signal::ctrl_c() => {
+                        println!("\n⚠️  Ctrl+C received. Shutting down gracefully...");
+                        return Ok::<(), Box<dyn std::error::Error>>(());
+                    }
                 }
             }
-            
-            // Brief pause between cycles
-            println!("⏳ Cycle complete. Waiting 30 seconds before next cycle...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        };
+        
+        // Run operations with Ctrl+C handling
+        tokio::select! {
+            result = operations => result,
+            _ = ctrl_c => {
+                println!("\n🛑 CTRL+C RECEIVED - Graceful shutdown initiated");
+                println!("🎖️  Admiral reporting: Operations terminated by user command");
+                println!("📊 Total cycles completed: {}", cycle_count);
+                Ok(())
+            }
         }
     }
 }
