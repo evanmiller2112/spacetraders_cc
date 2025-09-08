@@ -92,14 +92,20 @@ impl ShipPrioritizer {
     }
 
     fn analyze_ship_capabilities(&self, ship: &Ship) -> ShipCapabilities {
-        let can_mine = ship.mounts.iter().any(|mount| {
+        // Probes/satellites are designed for exploration, not mining
+        let is_probe = ship.registration.role == "SATELLITE" || ship.frame.symbol.contains("PROBE");
+        let can_mine = !is_probe && ship.mounts.iter().any(|mount| {
             mount.symbol.contains("MINING") || mount.symbol.contains("EXTRACTOR")
         });
         
-        let mining_power = ship.mounts.iter()
-            .filter(|mount| mount.symbol.contains("MINING") || mount.symbol.contains("EXTRACTOR"))
-            .map(|mount| mount.strength.unwrap_or(0))
-            .sum();
+        let mining_power = if is_probe {
+            0 // Probes have no mining power regardless of mounts
+        } else {
+            ship.mounts.iter()
+                .filter(|mount| mount.symbol.contains("MINING") || mount.symbol.contains("EXTRACTOR"))
+                .map(|mount| mount.strength.unwrap_or(0))
+                .sum()
+        };
         
         let can_trade = ship.cargo.capacity >= 10; // Minimum cargo for meaningful trading
         let can_haul = ship.cargo.capacity >= 20 && !can_mine; // Large cargo, not primarily a miner

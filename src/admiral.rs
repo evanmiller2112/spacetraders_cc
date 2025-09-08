@@ -6,12 +6,25 @@ use std::fs;
 
 pub struct Admiral {
     pub client: SpaceTradersClient,
+    debug_mode: bool,
 }
 
 impl Admiral {
     pub fn new(token: String) -> Self {
         let client = SpaceTradersClient::new(token);
-        Self { client }
+        Self { 
+            client,
+            debug_mode: false,
+        }
+    }
+    
+    pub fn set_debug_mode(&mut self, debug: bool) {
+        self.debug_mode = debug;
+        self.client.set_debug_mode(debug);
+    }
+    
+    pub fn set_api_logging(&mut self, logging: bool) {
+        self.client.set_api_logging(logging);
     }
 
     pub async fn run_autonomous_cycle(&self) -> Result<(), Box<dyn std::error::Error>> {

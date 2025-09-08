@@ -3,7 +3,7 @@ use crate::client::SpaceTradersClient;
 use crate::models::*;
 use crate::operations::ship_actor::*;
 use crate::operations::ship_prioritizer::*;
-use crate::storage::ShipStateStore;
+use crate::storage::{ShipStateStore, SurveyCache};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use std::collections::HashMap;
@@ -17,6 +17,7 @@ pub struct FleetCoordinator {
     prioritizer: ShipPrioritizer,
     fleet_metrics: Vec<ShipPerformanceMetrics>,
     ship_cache: ShipStateStore,
+    survey_cache: SurveyCache,
 }
 
 impl FleetCoordinator {
@@ -24,6 +25,7 @@ impl FleetCoordinator {
         let (status_sender, status_receiver) = mpsc::unbounded_channel();
         let prioritizer = ShipPrioritizer::new(client.clone());
         let ship_cache = ShipStateStore::new("storage/ship_states.json", 5); // 5 minute staleness threshold
+        let survey_cache = SurveyCache::new("storage/survey_cache.json", 12); // 12 hour cache duration
         
         Self {
             client,
@@ -34,6 +36,7 @@ impl FleetCoordinator {
             prioritizer,
             fleet_metrics: Vec::new(),
             ship_cache,
+            survey_cache,
         }
     }
 
@@ -42,6 +45,7 @@ impl FleetCoordinator {
         
         // Print cache status first
         self.ship_cache.print_cache_status();
+        self.survey_cache.print_cache_status();
         
         // Get all ships from API (we need this once to know what ships exist)
         let ships = self.client.get_ships().await?;
@@ -197,12 +201,21 @@ impl FleetCoordinator {
                         let recommended_task = self.prioritizer.recommend_optimal_task(metrics, contract);
                         println!("🎖️ {} (Priority: {:.2}) -> {}", ship_symbol, metrics.priority_weight, recommended_task);
                         
-                        // Assign task based on ship capabilities and priority
-                        if self.has_contract_materials(&ship, &needed_materials) {
+                        // Priority-based task assignment
+                        if self.needs_refuel(&ship) {
+                            println!("⛽ {} needs fuel ({}/{})", ship_symbol, ship.fuel.current, ship.fuel.capacity);
+                            self.assign_refuel_task(&ship).await?;
+                        } else if self.has_contract_materials(&ship, &needed_materials) {
+                            println!("📦 {} has contract materials - assigning delivery", ship_symbol);
                             self.assign_delivery_task(&ship, contract).await?;
+                        } else if self.is_cargo_full(&ship) {
+                            println!("🗃️ {} cargo full - need to manage inventory", ship_symbol);
+                            self.assign_cargo_management(&ship, contract).await?;
                         } else if metrics.capabilities.can_mine && metrics.contract_contribution >= 0.05 {
+                            println!("⛏️ {} assigned to mining (priority: {:.2})", ship_symbol, metrics.priority_weight);
                             self.assign_mining_task(&ship, &needed_materials, &contract.id).await?;
                         } else if metrics.capabilities.can_explore {
+                            println!("🛰️ {} assigned to exploration", ship_symbol);
                             self.assign_exploration_task(&ship).await?;
                         } else if metrics.capabilities.can_trade {
                             println!("🏪 {} assigned to support operations (trading ready)", ship_symbol);
@@ -358,6 +371,216 @@ impl FleetCoordinator {
             } else {
                 println!("  🚢 {}: {:?}", ship_symbol, state.status);
             }
+        }
+    }
+
+    // Cargo and fuel management helper methods
+    fn needs_refuel(&self, ship: &Ship) -> bool {
+        // Probes don't need fuel management - they're designed for long-range exploration
+        if self.is_probe(ship) {
+            return false;
+        }
+        
+        // Need refuel if less than 20% fuel or less than 400 units
+        let fuel_percentage = ship.fuel.current as f64 / ship.fuel.capacity as f64;
+        fuel_percentage < 0.2 || ship.fuel.current < 400
+    }
+
+    fn is_cargo_full(&self, ship: &Ship) -> bool {
+        ship.cargo.units >= ship.cargo.capacity
+    }
+
+    async fn assign_refuel_task(&mut self, ship: &Ship) -> Result<(), Box<dyn std::error::Error>> {
+        // Find nearest station with fuel
+        let refuel_station = self.find_nearest_refuel_station(ship).await?;
+        println!("⛽ {} assigned to refuel at {} (closest available)", ship.symbol, refuel_station);
+        
+        let action = ShipAction::Refuel {
+            station: refuel_station
+        };
+        
+        self.send_action_to_ship(&ship.symbol, action).await
+    }
+
+    async fn find_nearest_refuel_station(&mut self, ship: &Ship) -> Result<String, Box<dyn std::error::Error>> {
+        // Get current system waypoints - check cache first
+        let system_symbol = &ship.nav.system_symbol;
+        let waypoints = self.get_system_waypoints_cached(system_symbol).await?;
+        
+        // Find stations with fuel facilities
+        let mut fuel_stations = Vec::new();
+        for waypoint in waypoints {
+            if waypoint.traits.iter().any(|trait_| 
+                trait_.symbol == "FUEL_STATION" || 
+                trait_.symbol == "MARKETPLACE" ||
+                trait_.symbol == "SHIPYARD"
+            ) {
+                fuel_stations.push(waypoint);
+            }
+        }
+        
+        if fuel_stations.is_empty() {
+            // Fallback to headquarters if no fuel stations found
+            println!("⚠️ No fuel stations found in {}, using headquarters", system_symbol);
+            return Ok("X1-DC46-A1".to_string());
+        }
+        
+        // Calculate distances and find nearest
+        let ship_x = ship.nav.route.destination.x;
+        let ship_y = ship.nav.route.destination.y;
+        
+        let mut nearest_station = &fuel_stations[0];
+        let mut min_distance = f64::MAX;
+        
+        for station in &fuel_stations {
+            let dx = (station.x - ship_x) as f64;
+            let dy = (station.y - ship_y) as f64;
+            let distance = (dx * dx + dy * dy).sqrt();
+            
+            if distance < min_distance {
+                min_distance = distance;
+                nearest_station = station;
+            }
+        }
+        
+        println!("🔍 Found {} fuel stations, nearest is {} (distance: {:.1})", 
+                fuel_stations.len(), nearest_station.symbol, min_distance);
+        
+        Ok(nearest_station.symbol.clone())
+    }
+
+    async fn assign_cargo_management(&mut self, ship: &Ship, contract: &Contract) -> Result<(), Box<dyn std::error::Error>> {
+        // Determine what to do with cargo
+        let contract_materials: Vec<String> = contract.terms.deliver
+            .iter()
+            .map(|d| d.trade_symbol.clone())
+            .collect();
+
+        // Check what cargo we have
+        let mut has_contract_items = false;
+        let mut has_sellable_items = false;
+
+        for item in &ship.cargo.inventory {
+            if contract_materials.contains(&item.symbol) {
+                has_contract_items = true;
+            } else {
+                has_sellable_items = true;
+            }
+        }
+
+        if has_contract_items {
+            // Deliver contract items first
+            println!("📦 {} delivering contract materials", ship.symbol);
+            self.assign_delivery_task(ship, contract).await
+        } else if has_sellable_items {
+            // Sell non-contract items
+            println!("💰 {} selling non-contract cargo", ship.symbol);
+            self.assign_sell_task(ship).await
+        } else {
+            // Should not happen, but fallback to mining
+            println!("⚠️ {} cargo management fallback - return to mining", ship.symbol);
+            let needed_materials: Vec<String> = contract.terms.deliver
+                .iter()
+                .map(|d| d.trade_symbol.clone())
+                .collect();
+            self.assign_mining_task(ship, &needed_materials, &contract.id).await
+        }
+    }
+
+    async fn assign_sell_task(&mut self, ship: &Ship) -> Result<(), Box<dyn std::error::Error>> {
+        // Find nearest marketplace to sell cargo
+        let marketplace = self.find_nearest_marketplace(ship).await?;
+        println!("💰 {} assigned to sell cargo at {} (nearest marketplace)", ship.symbol, marketplace);
+
+        // Create sell action for non-contract items
+        let action = ShipAction::SellCargo {
+            marketplace,
+        };
+        
+        self.send_action_to_ship(&ship.symbol, action).await
+    }
+
+    async fn find_nearest_marketplace(&mut self, ship: &Ship) -> Result<String, Box<dyn std::error::Error>> {
+        // Get current system waypoints - check cache first
+        let system_symbol = &ship.nav.system_symbol;
+        let waypoints = self.get_system_waypoints_cached(system_symbol).await?;
+        
+        // Find marketplaces
+        let mut marketplaces = Vec::new();
+        for waypoint in waypoints {
+            if waypoint.traits.iter().any(|trait_| 
+                trait_.symbol == "MARKETPLACE" ||
+                trait_.symbol == "SHIPYARD"
+            ) {
+                marketplaces.push(waypoint);
+            }
+        }
+        
+        if marketplaces.is_empty() {
+            // Fallback to headquarters if no marketplaces found
+            println!("⚠️ No marketplaces found in {}, using headquarters", system_symbol);
+            return Ok("X1-DC46-A1".to_string());
+        }
+        
+        // Calculate distances and find nearest
+        let ship_x = ship.nav.route.destination.x;
+        let ship_y = ship.nav.route.destination.y;
+        
+        let mut nearest_marketplace = &marketplaces[0];
+        let mut min_distance = f64::MAX;
+        
+        for marketplace in &marketplaces {
+            let dx = (marketplace.x - ship_x) as f64;
+            let dy = (marketplace.y - ship_y) as f64;
+            let distance = (dx * dx + dy * dy).sqrt();
+            
+            if distance < min_distance {
+                min_distance = distance;
+                nearest_marketplace = marketplace;
+            }
+        }
+        
+        println!("🏪 Found {} marketplaces, nearest is {} (distance: {:.1})", 
+                marketplaces.len(), nearest_marketplace.symbol, min_distance);
+        
+        Ok(nearest_marketplace.symbol.clone())
+    }
+
+    // Helper method to get system waypoints - checks cache first
+    async fn get_system_waypoints_cached(&mut self, system_symbol: &str) -> Result<&Vec<Waypoint>, Box<dyn std::error::Error>> {
+        // Check if we need to scan the system
+        if self.survey_cache.should_scan_system(system_symbol) {
+            println!("📡 Scanning system {} (not in cache or stale)", system_symbol);
+            let waypoints = self.client.get_system_waypoints(system_symbol, None).await?;
+            self.survey_cache.cache_system_waypoints(system_symbol, waypoints)?;
+        }
+        
+        // Return cached waypoints (guaranteed to exist after the above check)
+        Ok(self.survey_cache.get_cached_waypoints(system_symbol).unwrap())
+    }
+
+    // Helper methods using cached data
+    pub fn find_nearest_fuel_station_cached(&mut self, system_symbol: &str, from_x: i32, from_y: i32) -> Option<String> {
+        if let Some(waypoint) = self.survey_cache.find_nearest_waypoint_with_trait(
+            system_symbol, "FUEL_STATION", from_x, from_y
+        ) {
+            Some(waypoint.symbol.clone())
+        } else if let Some(waypoint) = self.survey_cache.find_nearest_waypoint_with_trait(
+            system_symbol, "MARKETPLACE", from_x, from_y
+        ) {
+            Some(waypoint.symbol.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn find_nearest_marketplace_cached(&mut self, system_symbol: &str, from_x: i32, from_y: i32) -> Option<String> {
+        if let Some(waypoint) = self.survey_cache.find_nearest_waypoint_with_trait(
+            system_symbol, "MARKETPLACE", from_x, from_y
+        ) {
+            Some(waypoint.symbol.clone())
+        } else {
+            None
         }
     }
 }

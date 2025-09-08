@@ -48,7 +48,12 @@ pub enum ShipAction {
         items: Vec<String>,
         marketplace: String,
     },
-    Refuel,
+    Refuel { 
+        station: String 
+    },
+    SellCargo { 
+        marketplace: String 
+    },
     Dock,
     Orbit,
     Survey { target: String },
@@ -188,8 +193,11 @@ impl ShipActor {
             ShipAction::Survey { target } => {
                 self.execute_survey(target).await
             }
-            ShipAction::Refuel => {
-                self.execute_refuel().await
+            ShipAction::Refuel { station } => {
+                self.execute_refuel_at_station(station).await
+            }
+            ShipAction::SellCargo { marketplace } => {
+                self.execute_sell_cargo(marketplace).await
             }
             ShipAction::Dock => {
                 self.execute_dock().await
@@ -528,5 +536,115 @@ impl ShipActor {
                 println!("❌ Failed to get {} status: {}", self.ship_symbol, e);
             }
         }
+    }
+
+    async fn execute_refuel_at_station(&self, station: &str) -> Result<(), ShipActorError> {
+        println!("⛽ {} attempting to refuel at {}", self.ship_symbol, station);
+        
+        // First navigate to the station if not there
+        let current_ship = self.client.get_ship(&self.ship_symbol).await
+            .map_err(|e| ShipActorError(format!("Failed to get ship status: {}", e)))?;
+        
+        if current_ship.nav.waypoint_symbol != station {
+            println!("🚀 {} navigating to {} for refuel", self.ship_symbol, station);
+            
+            // Navigate to station
+            match self.client.navigate_ship(&self.ship_symbol, station).await {
+                Ok(_) => {
+                    println!("✅ {} arrived at {}", self.ship_symbol, station);
+                }
+                Err(e) => {
+                    return Err(ShipActorError(format!("Navigation to {} failed: {}", station, e)));
+                }
+            }
+        }
+        
+        // Dock at station
+        match self.client.dock_ship(&self.ship_symbol).await {
+            Ok(_) => {
+                println!("🚢 {} docked at {}", self.ship_symbol, station);
+            }
+            Err(e) => {
+                // Already docked is okay
+                if !e.to_string().contains("already docked") {
+                    return Err(ShipActorError(format!("Docking failed: {}", e)));
+                }
+            }
+        }
+        
+        // Refuel
+        match self.client.refuel_ship(&self.ship_symbol).await {
+            Ok(refuel_data) => {
+                println!("⛽ {} refueled: {} units for {} credits", 
+                        self.ship_symbol, 
+                        refuel_data.transaction.units,
+                        refuel_data.transaction.total_price);
+                Ok(())
+            }
+            Err(e) => {
+                Err(ShipActorError(format!("Refuel failed: {}", e)))
+            }
+        }
+    }
+
+    async fn execute_sell_cargo(&self, marketplace: &str) -> Result<(), ShipActorError> {
+        println!("💰 {} attempting to sell cargo at {}", self.ship_symbol, marketplace);
+        
+        // Get current ship status
+        let current_ship = self.client.get_ship(&self.ship_symbol).await
+            .map_err(|e| ShipActorError(format!("Failed to get ship status: {}", e)))?;
+        
+        if current_ship.cargo.inventory.is_empty() {
+            println!("📦 {} has no cargo to sell", self.ship_symbol);
+            return Ok(());
+        }
+        
+        // Navigate to marketplace if not there
+        if current_ship.nav.waypoint_symbol != marketplace {
+            println!("🚀 {} navigating to {} to sell cargo", self.ship_symbol, marketplace);
+            
+            match self.client.navigate_ship(&self.ship_symbol, marketplace).await {
+                Ok(_) => {
+                    println!("✅ {} arrived at {}", self.ship_symbol, marketplace);
+                }
+                Err(e) => {
+                    return Err(ShipActorError(format!("Navigation to {} failed: {}", marketplace, e)));
+                }
+            }
+        }
+        
+        // Dock at marketplace
+        match self.client.dock_ship(&self.ship_symbol).await {
+            Ok(_) => {
+                println!("🚢 {} docked at {}", self.ship_symbol, marketplace);
+            }
+            Err(e) => {
+                if !e.to_string().contains("already docked") {
+                    return Err(ShipActorError(format!("Docking failed: {}", e)));
+                }
+            }
+        }
+        
+        // Sell all cargo items
+        for item in &current_ship.cargo.inventory {
+            println!("💰 {} selling {} x{}", self.ship_symbol, item.symbol, item.units);
+            
+            match self.client.sell_cargo(&self.ship_symbol, &item.symbol, item.units).await {
+                Ok(sell_data) => {
+                    println!("💵 {} sold {} x{} for {} credits each", 
+                            self.ship_symbol, 
+                            item.symbol,
+                            sell_data.transaction.units,
+                            sell_data.transaction.price_per_unit);
+                }
+                Err(e) => {
+                    println!("⚠️ {} failed to sell {}: {}", self.ship_symbol, item.symbol, e);
+                    // Continue trying to sell other items
+                }
+            }
+        }
+        
+        println!("💰 {} finished selling cargo", self.ship_symbol);
+        Ok(())
     }
 }

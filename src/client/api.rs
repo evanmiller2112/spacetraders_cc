@@ -1,11 +1,15 @@
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use crate::models::*;
 use crate::API_BASE_URL;
+use std::fs::OpenOptions;
+use std::io::Write;
 
 #[derive(Clone)]
 pub struct SpaceTradersClient {
     client: reqwest::Client,
     pub token: String,
+    debug_mode: bool,
+    api_logging: bool,
 }
 
 impl SpaceTradersClient {
@@ -22,19 +26,96 @@ impl SpaceTradersClient {
             .build()
             .unwrap();
 
-        SpaceTradersClient { client, token }
+        SpaceTradersClient { 
+            client, 
+            token,
+            debug_mode: false,
+            api_logging: false,
+        }
+    }
+    
+    pub fn set_debug_mode(&mut self, debug: bool) {
+        self.debug_mode = debug;
+    }
+    
+    pub fn set_api_logging(&mut self, logging: bool) {
+        self.api_logging = logging;
+    }
+    
+    async fn request_approval(&self, method: &str, url: &str, body: Option<&str>) -> bool {
+        if !self.debug_mode {
+            return true; // Always approve if not in debug mode
+        }
+        
+        println!("\n🐛 DEBUG API CALL:");
+        println!("   Method: {}", method);
+        println!("   URL: {}", url);
+        if let Some(body) = body {
+            println!("   Body: {}", body);
+        }
+        print!("   Approve? (y/n): ");
+        
+        use std::io::{self, Write};
+        io::stdout().flush().unwrap();
+        
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        
+        matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+    }
+    
+    fn log_api_call(&self, method: &str, url: &str, body: Option<&str>, response_status: u16, response_body: Option<&str>) {
+        if !self.api_logging {
+            return;
+        }
+        
+        let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+        let log_entry = format!(
+            "\n=== API CALL [{timestamp}] ===\n\
+             Method: {method}\n\
+             URL: {url}\n\
+             Request Body: {request_body}\n\
+             Response Status: {response_status}\n\
+             Response Body: {response_body}\n\
+             ========================================\n",
+            timestamp = timestamp,
+            method = method,
+            url = url,
+            request_body = body.unwrap_or("None"),
+            response_status = response_status,
+            response_body = response_body.unwrap_or("Not captured")
+        );
+        
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("api_debug.log")
+        {
+            let _ = file.write_all(log_entry.as_bytes());
+        }
     }
 
     // Agent operations
     pub async fn get_agent(&self) -> Result<Agent, Box<dyn std::error::Error>> {
         let url = format!("{}/my/agent", API_BASE_URL);
+        
+        if !self.request_approval("GET", &url, None).await {
+            return Err("API call not approved".into());
+        }
+        
         let response = self.client.get(&url).send().await?;
+        let status = response.status().as_u16();
         
         if !response.status().is_success() {
-            return Err(format!("API request failed with status: {}", response.status()).into());
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("GET", &url, None, status, Some(&error_body));
+            return Err(format!("API request failed with status: {}", status).into());
         }
 
-        let agent_response: AgentResponse = response.json().await?;
+        let response_text = response.text().await?;
+        self.log_api_call("GET", &url, None, status, Some(&response_text));
+        
+        let agent_response: AgentResponse = serde_json::from_str(&response_text)?;
         Ok(agent_response.data)
     }
 
@@ -186,6 +267,10 @@ impl SpaceTradersClient {
             "waypointSymbol": waypoint_symbol
         });
         
+        if !self.request_approval("POST", &url, Some(&payload.to_string())).await {
+            return Err("API call not approved".into());
+        }
+        
         let response = self.client.post(&url).json(&payload).send().await?;
         
         if !response.status().is_success() {
@@ -266,6 +351,11 @@ impl SpaceTradersClient {
     // Refueling operations
     pub async fn refuel_ship(&self, ship_symbol: &str) -> Result<RefuelData, Box<dyn std::error::Error>> {
         let url = format!("{}/my/ships/{}/refuel", API_BASE_URL, ship_symbol);
+        
+        if !self.request_approval("POST", &url, Some("{}")).await {
+            return Err("API call not approved".into());
+        }
+        
         let response = self.client.post(&url).json(&serde_json::json!({})).send().await?;
         
         if !response.status().is_success() {
