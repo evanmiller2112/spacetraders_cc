@@ -27,15 +27,15 @@ pub struct ShipCapabilities {
 }
 
 pub struct ShipPrioritizer {
-    client: SpaceTradersClient,
-    performance_history: HashMap<String, Vec<ShipPerformanceMetrics>>,
+    _client: SpaceTradersClient,
+    _performance_history: HashMap<String, Vec<ShipPerformanceMetrics>>,
 }
 
 impl ShipPrioritizer {
     pub fn new(client: SpaceTradersClient) -> Self {
         Self {
-            client,
-            performance_history: HashMap::new(),
+            _client: client,
+            _performance_history: HashMap::new(),
         }
     }
 
@@ -175,7 +175,7 @@ impl ShipPrioritizer {
         })
     }
 
-    fn estimate_income_generation(&self, ship: &Ship, capabilities: &ShipCapabilities) -> f64 {
+    fn estimate_income_generation(&self, _ship: &Ship, capabilities: &ShipCapabilities) -> f64 {
         if capabilities.can_mine {
             // Mining income: mining power * cargo capacity * estimated cycles per hour
             let cycles_per_hour = 60.0 / 90.0; // Assume 90 seconds per mining cycle
@@ -190,7 +190,7 @@ impl ShipPrioritizer {
         }
     }
 
-    fn calculate_efficiency_score(&self, ship: &Ship, capabilities: &ShipCapabilities) -> f64 {
+    fn calculate_efficiency_score(&self, _ship: &Ship, capabilities: &ShipCapabilities) -> f64 {
         let mut score = 0.0;
         
         // Cargo efficiency
@@ -206,7 +206,7 @@ impl ShipPrioritizer {
         // Multi-role versatility bonus
         let roles = [capabilities.can_mine, capabilities.can_trade, capabilities.can_haul, capabilities.can_explore]
             .iter().filter(|&&x| x).count();
-        score += (roles as f64 * 0.1);
+        score += roles as f64 * 0.1;
         
         // Fuel efficiency
         if capabilities.fuel_capacity > 0 {

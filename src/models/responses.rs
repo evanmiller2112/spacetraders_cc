@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 // API Response wrappers
 #[derive(Debug, Deserialize)]
@@ -125,4 +125,67 @@ pub struct ScannedWaypoint {
     pub traits: Vec<crate::models::waypoint::Trait>,
     pub chart: Option<crate::models::waypoint::Chart>,
     pub faction: Option<crate::models::waypoint::WaypointFaction>,
+}
+
+// New response types for additional API endpoints
+#[derive(Debug, Deserialize)]
+pub struct SystemsResponse {
+    pub data: Vec<crate::models::system::System>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SystemResponse {
+    pub data: crate::models::system::System,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MarketResponse {
+    pub data: crate::models::market::Market,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PurchaseCargoResponse {
+    pub data: crate::models::market::PurchaseCargoData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SystemScanResponse {
+    pub data: SystemScanData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SystemScanData {
+    pub cooldown: crate::models::ship::ShipCooldown,
+    pub systems: Vec<crate::models::system::ScannedSystem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShipScanResponse {
+    pub data: ShipScanData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShipScanData {
+    pub cooldown: crate::models::ship::ShipCooldown,
+    pub ships: Vec<crate::models::navigation::ScannedShip>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FactionsResponse {
+    pub data: Vec<crate::models::faction::Faction>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FactionResponse {
+    pub data: crate::models::faction::Faction,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JumpGateResponse {
+    pub data: crate::models::navigation::JumpGate,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JumpResponse {
+    pub data: crate::models::navigation::JumpData,
 }

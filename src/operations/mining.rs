@@ -137,7 +137,7 @@ impl<'a> MiningOperations<'a> {
         
         let mut mining_cycles = 0;
         let mut fleet_surveys: HashMap<String, Vec<Survey>> = HashMap::new();
-        let mut max_cooldown_seconds: f64 = 0.0;
+        let mut _max_cooldown_seconds: f64 = 0.0;
         
         while mining_cycles < max_cycles {
             mining_cycles += 1;
@@ -189,7 +189,7 @@ impl<'a> MiningOperations<'a> {
             
             // Phase 2: PARALLEL Extraction for all ships
             println!("⛏️ Executing parallel extraction across fleet...");
-            max_cooldown_seconds = 0.0; // Reset for this cycle
+            _max_cooldown_seconds = 0.0; // Reset for this cycle
             
             for (ship, asteroid) in ready_miners {
                 println!("  ⛏️ {} extracting at {}...", ship.symbol, asteroid.symbol);
@@ -221,7 +221,7 @@ impl<'a> MiningOperations<'a> {
                         
                         if cooldown_seconds > 0.0 {
                             println!("      ⏳ {} cooldown: {:.1} seconds", ship.symbol, cooldown_seconds);
-                            max_cooldown_seconds = max_cooldown_seconds.max(cooldown_seconds);
+                            _max_cooldown_seconds = _max_cooldown_seconds.max(cooldown_seconds);
                         }
                         
                         // Check contract progress
@@ -256,7 +256,7 @@ impl<'a> MiningOperations<'a> {
                             // Extract cooldown seconds from error message
                             if let Some(cooldown_match) = extract_cooldown_from_error(&error_str) {
                                 println!("    ⏳ {} cooldown detected from error: {:.1} seconds", ship.symbol, cooldown_match);
-                                max_cooldown_seconds = max_cooldown_seconds.max(cooldown_match);
+                                _max_cooldown_seconds = _max_cooldown_seconds.max(cooldown_match);
                             }
                         }
                     }
@@ -267,9 +267,9 @@ impl<'a> MiningOperations<'a> {
             }
             
             // Dynamic cooldown management based on actual API response
-            if max_cooldown_seconds > 0.0 {
-                let wait_seconds = (max_cooldown_seconds as u64).min(120); // Cap at 2 minutes for safety
-                println!("⏳ Fleet cooldown management ({:.1} seconds from API response)...", max_cooldown_seconds);
+            if _max_cooldown_seconds > 0.0 {
+                let wait_seconds = (_max_cooldown_seconds as u64).min(120); // Cap at 2 minutes for safety
+                println!("⏳ Fleet cooldown management ({:.1} seconds from API response)...", _max_cooldown_seconds);
                 sleep(Duration::from_secs(wait_seconds)).await;
             } else {
                 // Fallback to short wait if no cooldown detected

@@ -85,7 +85,7 @@ pub struct RefuelTransaction {
     #[serde(rename = "totalPrice")]
     pub total_price: i32,
     #[serde(rename = "fuelPrice")]
-    pub fuel_price: i32,
-    pub units: i32,
+    pub fuel_price: Option<i32>,
+    pub units: Option<i32>,
     pub timestamp: String,
 }

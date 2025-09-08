@@ -202,7 +202,18 @@ impl FleetCoordinator {
                         println!("🎖️ {} (Priority: {:.2}) -> {}", ship_symbol, metrics.priority_weight, recommended_task);
                         
                         // Priority-based task assignment
-                        if self.needs_refuel(&ship) {
+                        // Check if this is a probe/satellite first - they can't move and need special handling
+                        if self.is_probe(&ship) {
+                            // Probes can only scan, they cannot move
+                            if ship.fuel.capacity == 0 {
+                                // Stationary satellite - skip entirely to reduce console noise
+                                // TODO: Implement useful satellite functionality later
+                                continue;
+                            } else {
+                                println!("🔭 {} is a probe - assigning exploration", ship_symbol);
+                                self.assign_exploration_task(&ship).await?;
+                            }
+                        } else if self.needs_refuel(&ship) {
                             println!("⛽ {} needs fuel ({}/{})", ship_symbol, ship.fuel.current, ship.fuel.capacity);
                             self.assign_refuel_task(&ship).await?;
                         } else if self.has_contract_materials(&ship, &needed_materials) {
@@ -211,12 +222,9 @@ impl FleetCoordinator {
                         } else if self.is_cargo_full(&ship) {
                             println!("🗃️ {} cargo full - need to manage inventory", ship_symbol);
                             self.assign_cargo_management(&ship, contract).await?;
-                        } else if metrics.capabilities.can_mine && metrics.contract_contribution >= 0.05 && !self.is_probe(&ship) {
+                        } else if metrics.capabilities.can_mine && metrics.contract_contribution >= 0.05 {
                             println!("⛏️ {} assigned to mining (priority: {:.2})", ship_symbol, metrics.priority_weight);
                             self.assign_mining_task(&ship, &needed_materials, &contract.id).await?;
-                        } else if metrics.capabilities.can_explore {
-                            println!("🛰️ {} assigned to exploration", ship_symbol);
-                            self.assign_exploration_task(&ship).await?;
                         } else if metrics.capabilities.can_trade {
                             println!("🏪 {} assigned to support operations (trading ready)", ship_symbol);
                         }
@@ -228,7 +236,7 @@ impl FleetCoordinator {
         Ok(())
     }
 
-    fn can_mine(&self, ship: &Ship) -> bool {
+    fn _can_mine(&self, ship: &Ship) -> bool {
         ship.mounts.iter().any(|mount| {
             mount.symbol.contains("MINING") || mount.symbol.contains("EXTRACTOR")
         })
@@ -245,15 +253,89 @@ impl FleetCoordinator {
     async fn assign_mining_task(&mut self, ship: &Ship, needed_materials: &[String], contract_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Find suitable mining location using cached waypoints
         let system_symbol = ship.nav.waypoint_symbol.split('-').take(2).collect::<Vec<&str>>().join("-");
+        let client_for_nav = self.client.clone(); // Clone before mutable borrow
         let waypoints = self.get_system_waypoints_cached(&system_symbol).await?;
         
-        // Find best asteroid field
-        let asteroid_fields: Vec<_> = waypoints.into_iter()
-            .filter(|w| w.waypoint_type == "ASTEROID" || w.waypoint_type == "ENGINEERED_ASTEROID")
+        // Determine what deposit type we need based on the materials
+        let needed_deposit_trait = Self::determine_needed_deposit_type(needed_materials);
+        println!("🎯 CONTRACT ANALYSIS: Need materials {:?}", needed_materials);
+        println!("   📋 DEPOSIT REQUIREMENT: Looking for asteroids with {}", needed_deposit_trait);
+        
+        // Show the logic behind deposit selection
+        let material_category = if needed_materials.iter().any(|m| ["IRON_ORE", "COPPER_ORE", "ALUMINUM_ORE", "GOLD_ORE", "PLATINUM_ORE", "SILVER_ORE", "URANIUM_ORE", "TITANIUM_ORE", "ZINC_ORE"].contains(&m.as_str())) {
+            "metal ores"
+        } else if needed_materials.iter().any(|m| ["PRECIOUS_STONES", "DIAMONDS", "RARE_EARTH_ELEMENTS"].contains(&m.as_str())) {
+            "precious materials"
+        } else if needed_materials.iter().any(|m| ["QUARTZ_SAND", "SILICON_CRYSTALS", "CRYSTALLIZED_SULFUR", "SALT", "GRAPHITE", "LIMESTONE", "CLAY"].contains(&m.as_str())) {
+            "industrial minerals"
+        } else {
+            "unknown materials"
+        };
+        println!("   🧭 LOGIC: {} are {} → target deposit type: {}", needed_materials.join(", "), material_category, needed_deposit_trait);
+        
+        // Find asteroids with the right deposit type
+        let suitable_asteroids: Vec<_> = waypoints.into_iter()
+            .filter(|w| {
+                (w.waypoint_type == "ASTEROID" || w.waypoint_type == "ENGINEERED_ASTEROID") &&
+                w.traits.iter().any(|t| t.symbol == needed_deposit_trait)
+            })
             .collect();
         
-        if let Some(target) = asteroid_fields.first() {
-            println!("⛏️ Assigning {} to mine at {}", ship.symbol, target.symbol);
+        // Filter asteroids by fuel safety - check if ship can reach them
+        let total_suitable = suitable_asteroids.len();
+        println!("🔍 Checking fuel safety for {} potential mining targets", total_suitable);
+        let mut fuel_safe_asteroids = Vec::new();
+        
+        for asteroid in suitable_asteroids {
+            // Create navigation planner for fuel checks
+            let nav_planner = crate::operations::NavigationPlanner::new(client_for_nav.clone());
+            
+            match nav_planner.can_navigate_safely(ship, &asteroid.symbol).await {
+                Ok(safety_check) => {
+                    if safety_check.is_safe {
+                        println!("✅ {} is fuel-safe: {}", asteroid.symbol, safety_check.reason);
+                        fuel_safe_asteroids.push(asteroid);
+                    } else {
+                        println!("⛽ {} is too far: {}", asteroid.symbol, safety_check.reason);
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️ {} fuel check failed: {}, including anyway", asteroid.symbol, e);
+                    fuel_safe_asteroids.push(asteroid); // Include if check fails
+                }
+            }
+        }
+        
+        // Sort by preference: Engineered asteroids with marketplaces first, then others
+        fuel_safe_asteroids.sort_by(|a, b| {
+            let a_score = Self::calculate_mining_preference_score(a);
+            let b_score = Self::calculate_mining_preference_score(b);
+            b_score.cmp(&a_score) // Descending order (higher score first)
+        });
+        
+        if let Some(target) = fuel_safe_asteroids.first() {
+            let deposit_types: Vec<String> = target.traits.iter()
+                .filter(|t| t.symbol.contains("DEPOSIT"))
+                .map(|t| t.symbol.clone())
+                .collect();
+            
+            let score = Self::calculate_mining_preference_score(target);
+            let has_marketplace = target.traits.iter().any(|t| t.symbol == "MARKETPLACE");
+            let has_fuel = target.traits.iter().any(|t| t.symbol == "FUEL_STATION");
+            
+            println!("⛏️ Assigning {} to mine at {} ({})", ship.symbol, target.symbol, target.waypoint_type);
+            println!("   🎯 REASON: Need {:?} → requires {} → this asteroid has it", needed_materials, needed_deposit_trait);
+            println!("   💎 Deposit types: {:?}", deposit_types);
+            println!("   📊 Selection score: {} {}{}", score, 
+                    if has_marketplace { "🏪" } else { "" },
+                    if has_fuel { "⛽" } else { "" });
+            if score > 0 {
+                println!("   ⭐ PRIORITY: {}", 
+                    if score >= 1100 { "Engineered asteroid with marketplace - optimal!" }
+                    else if score >= 200 { "Has fuel station - convenient refueling" }
+                    else if score >= 100 { "Engineered asteroid - better yields" }
+                    else { "Standard asteroid" });
+            }
             
             let mining_action = ShipAction::Mine {
                 target: target.symbol.clone(),
@@ -263,10 +345,84 @@ impl FleetCoordinator {
             
             self.send_action_to_ship(&ship.symbol, mining_action).await?;
         } else {
-            println!("⚠️ No mining locations found for {}", ship.symbol);
+            let total_fuel_safe = fuel_safe_asteroids.len();
+            println!("⚠️ No fuel-safe mining locations found for {} (need deposit type: {})", ship.symbol, needed_deposit_trait);
+            println!("   📊 Analysis summary:");
+            println!("     • Suitable deposit type: {} asteroids", total_suitable);
+            println!("     • Fuel-safe: {} asteroids", total_fuel_safe);
+            println!("   Available asteroids:");
+            for waypoint in waypoints.iter().filter(|w| w.waypoint_type == "ASTEROID" || w.waypoint_type == "ENGINEERED_ASTEROID") {
+                let deposits: Vec<String> = waypoint.traits.iter()
+                    .filter(|t| t.symbol.contains("DEPOSIT"))
+                    .map(|t| t.symbol.clone())
+                    .collect();
+                println!("     • {} - {:?}", waypoint.symbol, deposits);
+            }
         }
         
         Ok(())
+    }
+    
+    /// Determine what deposit type is needed based on the materials we're looking for
+    fn determine_needed_deposit_type(needed_materials: &[String]) -> &'static str {
+        // Check if we need metal ores (iron, copper, aluminum, etc.)
+        let metal_ores = [
+            "IRON_ORE", "COPPER_ORE", "ALUMINUM_ORE", "GOLD_ORE", "PLATINUM_ORE", 
+            "SILVER_ORE", "URANIUM_ORE", "TITANIUM_ORE", "ZINC_ORE"
+        ];
+        
+        // Check if we need precious materials  
+        let precious_materials = [
+            "PRECIOUS_STONES", "DIAMONDS", "RARE_EARTH_ELEMENTS"
+        ];
+        
+        // Check if we need industrial minerals
+        let industrial_minerals = [
+            "QUARTZ_SAND", "SILICON_CRYSTALS", "CRYSTALLIZED_SULFUR", "SALT",
+            "GRAPHITE", "LIMESTONE", "CLAY"
+        ];
+        
+        for material in needed_materials {
+            if metal_ores.iter().any(|&ore| material.contains(ore)) {
+                return "COMMON_METAL_DEPOSITS";
+            }
+            if precious_materials.iter().any(|&precious| material.contains(precious)) {
+                return "PRECIOUS_METAL_DEPOSITS"; // If this exists
+            }
+            if industrial_minerals.iter().any(|&mineral| material.contains(mineral)) {
+                return "MINERAL_DEPOSITS";
+            }
+        }
+        
+        // Default to common metal deposits for unknown materials that might be ores
+        "COMMON_METAL_DEPOSITS"
+    }
+    
+    /// Calculate mining preference score (higher = better)
+    fn calculate_mining_preference_score(waypoint: &Waypoint) -> i32 {
+        let mut score = 0;
+        
+        // Prefer engineered asteroids (usually better yields)
+        if waypoint.waypoint_type == "ENGINEERED_ASTEROID" {
+            score += 100;
+        }
+        
+        // Huge bonus for having a marketplace (can sell immediately)
+        if waypoint.traits.iter().any(|t| t.symbol == "MARKETPLACE") {
+            score += 1000;
+        }
+        
+        // Bonus for fuel stations (can refuel on-site)  
+        if waypoint.traits.iter().any(|t| t.symbol == "FUEL_STATION") {
+            score += 200;
+        }
+        
+        // Small penalty for dangerous traits
+        if waypoint.traits.iter().any(|t| t.symbol == "EXPLOSIVE_GASES") {
+            score -= 10;
+        }
+        
+        score
     }
 
     async fn assign_exploration_task(&mut self, ship: &Ship) -> Result<(), Box<dyn std::error::Error>> {
@@ -282,6 +438,7 @@ impl FleetCoordinator {
         self.send_action_to_ship(&ship.symbol, exploration_action).await?;
         Ok(())
     }
+
 
     async fn assign_delivery_task(&mut self, ship: &Ship, contract: &Contract) -> Result<(), Box<dyn std::error::Error>> {
         // Find deliverable items
@@ -582,7 +739,7 @@ impl FleetCoordinator {
     
     /// Convenience method for finding fuel stations
     pub async fn find_fuel_station(&mut self, system_symbol: &str, from_x: i32, from_y: i32, scanning_ship_symbol: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        self.find_waypoint_with_trait(system_symbol, from_x, from_y, &["FUEL_STATION", "MARKETPLACE", "SHIPYARD"], scanning_ship_symbol).await
+        self.find_waypoint_with_trait(system_symbol, from_x, from_y, &["MARKETPLACE"], scanning_ship_symbol).await
     }
     
     /// Scan waypoints for detailed trait data and cache the results

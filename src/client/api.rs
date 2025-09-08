@@ -97,10 +97,15 @@ impl SpaceTradersClient {
 
     // Scanning operations
     pub async fn scan_waypoints(&self, ship_symbol: &str) -> Result<Vec<ScannedWaypoint>, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::scan_waypoints", "ship_symbol={}", ship_symbol);
+        
         let url = format!("{}/my/ships/{}/scan/waypoints", API_BASE_URL, ship_symbol);
+        crate::debug_api_call!("POST", &url, "{}");
         
         if !self.request_approval("POST", &url, Some("{}")).await {
-            return Err("API call not approved".into());
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::scan_waypoints", &error);
+            return error;
         }
         
         let response = self.client.post(&url).json(&serde_json::json!({})).send().await?;
@@ -109,22 +114,31 @@ impl SpaceTradersClient {
         if !response.status().is_success() {
             let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
             self.log_api_call("POST", &url, Some("{}"), status, Some(&error_body));
-            return Err(format!("Waypoint scan failed with status: {}", status).into());
+            let error = Err(format!("Waypoint scan failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::scan_waypoints", &error);
+            return error;
         }
 
         let response_text = response.text().await?;
         self.log_api_call("POST", &url, Some("{}"), status, Some(&response_text));
         
         let scan_response: WaypointScanResponse = serde_json::from_str(&response_text)?;
-        Ok(scan_response.data.waypoints)
+        let result = Ok(scan_response.data.waypoints);
+        crate::debug_fn_exit!("SpaceTradersClient::scan_waypoints", &result);
+        result
     }
 
     // Agent operations
     pub async fn get_agent(&self) -> Result<Agent, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::get_agent");
+        
         let url = format!("{}/my/agent", API_BASE_URL);
+        crate::debug_api_call!("GET", &url);
         
         if !self.request_approval("GET", &url, None).await {
-            return Err("API call not approved".into());
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_agent", &error);
+            return error;
         }
         
         let response = self.client.get(&url).send().await?;
@@ -133,14 +147,18 @@ impl SpaceTradersClient {
         if !response.status().is_success() {
             let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
             self.log_api_call("GET", &url, None, status, Some(&error_body));
-            return Err(format!("API request failed with status: {}", status).into());
+            let error = Err(format!("API request failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_agent", &error);
+            return error;
         }
 
         let response_text = response.text().await?;
         self.log_api_call("GET", &url, None, status, Some(&response_text));
         
         let agent_response: AgentResponse = serde_json::from_str(&response_text)?;
-        Ok(agent_response.data)
+        let result = Ok(agent_response.data);
+        crate::debug_fn_exit!("SpaceTradersClient::get_agent", &result);
+        result
     }
 
     // Waypoint operations
@@ -383,10 +401,16 @@ impl SpaceTradersClient {
         let response = self.client.post(&url).json(&serde_json::json!({})).send().await?;
         
         if !response.status().is_success() {
-            return Err(format!("API request failed with status: {}", response.status()).into());
+            let error_text = response.text().await?;
+            return Err(format!("Refuel failed: {}", error_text).into());
         }
 
-        let refuel_response: RefuelResponse = response.json().await?;
+        let response_text = response.text().await?;
+        if self.debug_mode {
+            println!("🔍 Refuel API response: {}", response_text);
+        }
+        
+        let refuel_response: RefuelResponse = serde_json::from_str(&response_text)?;
         Ok(refuel_response.data)
     }
 
@@ -418,5 +442,367 @@ impl SpaceTradersClient {
 
         let purchase_response: ShipPurchaseResponse = response.json().await?;
         Ok(purchase_response.data)
+    }
+
+    // Systems operations
+    pub async fn get_systems(&self, page: Option<i32>, limit: Option<i32>) -> Result<Vec<System>, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::get_systems");
+        
+        let mut url = format!("{}/systems", API_BASE_URL);
+        let mut query_params = Vec::new();
+        
+        if let Some(p) = page {
+            query_params.push(format!("page={}", p));
+        }
+        if let Some(l) = limit {
+            query_params.push(format!("limit={}", l));
+        }
+        
+        if !query_params.is_empty() {
+            url.push_str(&format!("?{}", query_params.join("&")));
+        }
+        
+        crate::debug_api_call!("GET", &url);
+        
+        if !self.request_approval("GET", &url, None).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_systems", &error);
+            return error;
+        }
+        
+        let response = self.client.get(&url).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("GET", &url, None, status, Some(&error_body));
+            let error = Err(format!("Get systems failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_systems", &error);
+            return error;
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("GET", &url, None, status, Some(&response_text));
+        
+        let systems_response: SystemsResponse = serde_json::from_str(&response_text)?;
+        let result = Ok(systems_response.data);
+        crate::debug_fn_exit!("SpaceTradersClient::get_systems", &result);
+        result
+    }
+
+    pub async fn get_system(&self, system_symbol: &str) -> Result<System, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::get_system", "system_symbol={}", system_symbol);
+        
+        let url = format!("{}/systems/{}", API_BASE_URL, system_symbol);
+        crate::debug_api_call!("GET", &url);
+        
+        if !self.request_approval("GET", &url, None).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_system", &error);
+            return error;
+        }
+        
+        let response = self.client.get(&url).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("GET", &url, None, status, Some(&error_body));
+            let error = Err(format!("Get system failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_system", &error);
+            return error;
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("GET", &url, None, status, Some(&response_text));
+        
+        let system_response: SystemResponse = serde_json::from_str(&response_text)?;
+        let result = Ok(system_response.data);
+        crate::debug_fn_exit!("SpaceTradersClient::get_system", &result);
+        result
+    }
+
+    // Marketplace operations
+    pub async fn get_market(&self, system_symbol: &str, waypoint_symbol: &str) -> Result<Market, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::get_market", "system={}, waypoint={}", system_symbol, waypoint_symbol);
+        
+        let url = format!("{}/systems/{}/waypoints/{}/market", API_BASE_URL, system_symbol, waypoint_symbol);
+        crate::debug_api_call!("GET", &url);
+        
+        if !self.request_approval("GET", &url, None).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_market", &error);
+            return error;
+        }
+        
+        let response = self.client.get(&url).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("GET", &url, None, status, Some(&error_body));
+            let error = Err(format!("Get market failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_market", &error);
+            return error;
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("GET", &url, None, status, Some(&response_text));
+        
+        let market_response: MarketResponse = serde_json::from_str(&response_text)?;
+        let result = Ok(market_response.data);
+        crate::debug_fn_exit!("SpaceTradersClient::get_market", &result);
+        result
+    }
+
+    // Additional trading operations
+    pub async fn purchase_cargo(&self, ship_symbol: &str, trade_symbol: &str, units: i32) -> Result<PurchaseCargoData, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::purchase_cargo", "ship={}, trade_symbol={}, units={}", ship_symbol, trade_symbol, units);
+        
+        let url = format!("{}/my/ships/{}/purchase", API_BASE_URL, ship_symbol);
+        let payload = serde_json::json!({
+            "symbol": trade_symbol,
+            "units": units
+        });
+        
+        crate::debug_api_call!("POST", &url, &payload.to_string());
+        
+        if !self.request_approval("POST", &url, Some(&payload.to_string())).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::purchase_cargo", &error);
+            return error;
+        }
+        
+        let response = self.client.post(&url).json(&payload).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("POST", &url, Some(&payload.to_string()), status, Some(&error_body));
+            let error = Err(format!("Purchase cargo failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::purchase_cargo", &error);
+            return error;
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("POST", &url, Some(&payload.to_string()), status, Some(&response_text));
+        
+        let purchase_response: PurchaseCargoResponse = serde_json::from_str(&response_text)?;
+        let result = Ok(purchase_response.data);
+        crate::debug_fn_exit!("SpaceTradersClient::purchase_cargo", &result);
+        result
+    }
+
+    // Additional scanning operations
+    pub async fn scan_systems(&self, ship_symbol: &str) -> Result<Vec<ScannedSystem>, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::scan_systems", "ship_symbol={}", ship_symbol);
+        
+        let url = format!("{}/my/ships/{}/scan/systems", API_BASE_URL, ship_symbol);
+        crate::debug_api_call!("POST", &url, "{}");
+        
+        if !self.request_approval("POST", &url, Some("{}")).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::scan_systems", &error);
+            return error;
+        }
+        
+        let response = self.client.post(&url).json(&serde_json::json!({})).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("POST", &url, Some("{}"), status, Some(&error_body));
+            let error = Err(format!("System scan failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::scan_systems", &error);
+            return error;
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("POST", &url, Some("{}"), status, Some(&response_text));
+        
+        let scan_response: SystemScanResponse = serde_json::from_str(&response_text)?;
+        let result = Ok(scan_response.data.systems);
+        crate::debug_fn_exit!("SpaceTradersClient::scan_systems", &result);
+        result
+    }
+
+    pub async fn scan_ships(&self, ship_symbol: &str) -> Result<Vec<ScannedShip>, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::scan_ships", "ship_symbol={}", ship_symbol);
+        
+        let url = format!("{}/my/ships/{}/scan/ships", API_BASE_URL, ship_symbol);
+        crate::debug_api_call!("POST", &url, "{}");
+        
+        if !self.request_approval("POST", &url, Some("{}")).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::scan_ships", &error);
+            return error;
+        }
+        
+        let response = self.client.post(&url).json(&serde_json::json!({})).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("POST", &url, Some("{}"), status, Some(&error_body));
+            let error = Err(format!("Ship scan failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::scan_ships", &error);
+            return error;
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("POST", &url, Some("{}"), status, Some(&response_text));
+        
+        let scan_response: ShipScanResponse = serde_json::from_str(&response_text)?;
+        let result = Ok(scan_response.data.ships);
+        crate::debug_fn_exit!("SpaceTradersClient::scan_ships", &result);
+        result
+    }
+
+    // Faction operations
+    pub async fn get_factions(&self, page: Option<i32>, limit: Option<i32>) -> Result<Vec<Faction>, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::get_factions");
+        
+        let mut url = format!("{}/factions", API_BASE_URL);
+        let mut query_params = Vec::new();
+        
+        if let Some(p) = page {
+            query_params.push(format!("page={}", p));
+        }
+        if let Some(l) = limit {
+            query_params.push(format!("limit={}", l));
+        }
+        
+        if !query_params.is_empty() {
+            url.push_str(&format!("?{}", query_params.join("&")));
+        }
+        
+        crate::debug_api_call!("GET", &url);
+        
+        if !self.request_approval("GET", &url, None).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_factions", &error);
+            return error;
+        }
+        
+        let response = self.client.get(&url).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("GET", &url, None, status, Some(&error_body));
+            let error = Err(format!("Get factions failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_factions", &error);
+            return error;
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("GET", &url, None, status, Some(&response_text));
+        
+        let factions_response: FactionsResponse = serde_json::from_str(&response_text)?;
+        let result = Ok(factions_response.data);
+        crate::debug_fn_exit!("SpaceTradersClient::get_factions", &result);
+        result
+    }
+
+    pub async fn get_faction(&self, faction_symbol: &str) -> Result<Faction, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::get_faction", "faction_symbol={}", faction_symbol);
+        
+        let url = format!("{}/factions/{}", API_BASE_URL, faction_symbol);
+        crate::debug_api_call!("GET", &url);
+        
+        if !self.request_approval("GET", &url, None).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_faction", &error);
+            return error;
+        }
+        
+        let response = self.client.get(&url).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("GET", &url, None, status, Some(&error_body));
+            let error = Err(format!("Get faction failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_faction", &error);
+            return error;
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("GET", &url, None, status, Some(&response_text));
+        
+        let faction_response: FactionResponse = serde_json::from_str(&response_text)?;
+        let result = Ok(faction_response.data);
+        crate::debug_fn_exit!("SpaceTradersClient::get_faction", &result);
+        result
+    }
+
+    // Jump gate operations
+    pub async fn get_jump_gate(&self, system_symbol: &str, waypoint_symbol: &str) -> Result<JumpGate, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::get_jump_gate", "system={}, waypoint={}", system_symbol, waypoint_symbol);
+        
+        let url = format!("{}/systems/{}/waypoints/{}/jump-gate", API_BASE_URL, system_symbol, waypoint_symbol);
+        crate::debug_api_call!("GET", &url);
+        
+        if !self.request_approval("GET", &url, None).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_jump_gate", &error);
+            return error;
+        }
+        
+        let response = self.client.get(&url).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("GET", &url, None, status, Some(&error_body));
+            let error = Err(format!("Get jump gate failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::get_jump_gate", &error);
+            return error;
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("GET", &url, None, status, Some(&response_text));
+        
+        let jump_gate_response: JumpGateResponse = serde_json::from_str(&response_text)?;
+        let result = Ok(jump_gate_response.data);
+        crate::debug_fn_exit!("SpaceTradersClient::get_jump_gate", &result);
+        result
+    }
+
+    // Jump navigation
+    pub async fn jump_ship(&self, ship_symbol: &str, system_symbol: &str) -> Result<JumpData, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::jump_ship", "ship_symbol={}, system_symbol={}", ship_symbol, system_symbol);
+        
+        let url = format!("{}/my/ships/{}/jump", API_BASE_URL, ship_symbol);
+        let payload = serde_json::json!({
+            "systemSymbol": system_symbol
+        });
+        
+        crate::debug_api_call!("POST", &url, &payload.to_string());
+        
+        if !self.request_approval("POST", &url, Some(&payload.to_string())).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::jump_ship", &error);
+            return error;
+        }
+        
+        let response = self.client.post(&url).json(&payload).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("POST", &url, Some(&payload.to_string()), status, Some(&error_body));
+            let error = Err(format!("Jump failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::jump_ship", &error);
+            return error;
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("POST", &url, Some(&payload.to_string()), status, Some(&response_text));
+        
+        let jump_response: JumpResponse = serde_json::from_str(&response_text)?;
+        let result = Ok(jump_response.data);
+        crate::debug_fn_exit!("SpaceTradersClient::jump_ship", &result);
+        result
     }
 }

@@ -6,6 +6,7 @@ pub mod client;
 pub mod operations;
 pub mod admiral;
 pub mod storage;
+pub mod debug;
 
 // Re-export commonly used types
 pub use models::{

@@ -130,7 +130,7 @@ impl<'a> ExplorationOperations<'a> {
 
         // Navigate to target
         match self.ship_ops.navigate(&probe.symbol, target_waypoint).await {
-            Ok(nav_data) => {
+            Ok(_nav_data) => {
                 println!("✅ {} navigation started to {}", probe.symbol, target_waypoint);
                 // Note: PROBE ships might have special movement with 0 fuel capacity
             }
