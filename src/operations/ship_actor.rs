@@ -5,6 +5,7 @@ use crate::operations::{ShipOperations, NavigationPlanner};
 use crate::storage::CooldownStore;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep};
+use chrono;
 #[derive(Debug)]
 pub struct ShipActorError(pub String);
 
@@ -258,13 +259,52 @@ impl ShipActor {
                 return Err(ShipActorError(format!("Failed to navigate to mining location {}: {}", target, e)));
             }
             
-            // Need to dock/orbit appropriately for mining
+            // Wait for arrival if in transit
+            loop {
+                let current_ship = self.client.get_ship(&self.ship_symbol).await
+                    .map_err(|e| ShipActorError(format!("Failed to check ship status: {}", e)))?;
+                
+                if current_ship.nav.status == "IN_TRANSIT" {
+                    // Parse arrival time and calculate wait
+                    if let Ok(arrival_time) = chrono::DateTime::parse_from_rfc3339(&current_ship.nav.route.arrival) {
+                        let now = chrono::Utc::now();
+                        let wait_seconds = (arrival_time.timestamp() - now.timestamp()).max(0);
+                        if wait_seconds > 0 {
+                            println!("⏳ {} in transit, arriving in {} seconds", self.ship_symbol, wait_seconds);
+                            tokio::time::sleep(Duration::from_secs(wait_seconds.min(5) as u64)).await;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            
+            // Need to orbit for mining
             match self.client.orbit_ship(&self.ship_symbol).await {
                 Ok(_) => println!("🛸 {} in orbit for mining", self.ship_symbol),
-                Err(e) => println!("⚠️ {} orbit failed (may already be in orbit): {}", self.ship_symbol, e)
+                Err(e) => {
+                    if !e.to_string().contains("already in orbit") {
+                        println!("⚠️ {} orbit failed: {}", self.ship_symbol, e);
+                    }
+                }
             }
         } else {
             println!("✅ {} already at mining target {}", self.ship_symbol, target);
+            
+            // Ensure we're in orbit even if already at location
+            let current_ship = self.client.get_ship(&self.ship_symbol).await
+                .map_err(|e| ShipActorError(format!("Failed to check ship status: {}", e)))?;
+            
+            if current_ship.nav.status == "DOCKED" {
+                match self.client.orbit_ship(&self.ship_symbol).await {
+                    Ok(_) => println!("🛸 {} now in orbit for mining", self.ship_symbol),
+                    Err(e) => {
+                        if !e.to_string().contains("already in orbit") {
+                            return Err(ShipActorError(format!("Failed to orbit for mining: {}", e)));
+                        }
+                    }
+                }
+            }
         }
         
         println!("⛏️ {} performing extraction at {}", self.ship_symbol, target);
@@ -328,6 +368,24 @@ impl ShipActor {
     }
 
     async fn execute_survey(&mut self, target: &str) -> Result<(), ShipActorError> {
+        // Ensure ship is in orbit before surveying
+        let ship = self.client.get_ship(&self.ship_symbol).await
+            .map_err(|e| ShipActorError(format!("Failed to get ship status: {}", e)))?;
+            
+        if ship.nav.status == "DOCKED" {
+            println!("🛸 {} needs to orbit before surveying", self.ship_symbol);
+            match self.client.orbit_ship(&self.ship_symbol).await {
+                Ok(_) => {
+                    println!("🌌 {} now in orbit, ready to survey", self.ship_symbol);
+                }
+                Err(e) => {
+                    if !e.to_string().contains("already in orbit") {
+                        return Err(ShipActorError(format!("Failed to orbit for survey: {}", e)));
+                    }
+                }
+            }
+        }
+        
         match self.client.create_survey(&self.ship_symbol).await {
             Ok(survey_data) => {
                 println!("🔍 {} surveyed {} - found {} deposits", self.ship_symbol, target, survey_data.surveys.len());
@@ -398,6 +456,22 @@ impl ShipActor {
             Ok(ship) => ship,
             Err(e) => return Err(ShipActorError(format!("Could not get ship data: {}", e)))
         };
+        
+        // Check if ship needs to be in orbit before navigating
+        if ship.nav.status == "DOCKED" {
+            println!("🛸 {} needs to orbit before navigating", self.ship_symbol);
+            match self.client.orbit_ship(&self.ship_symbol).await {
+                Ok(_) => {
+                    println!("🌌 {} now in orbit, ready to navigate", self.ship_symbol);
+                }
+                Err(e) => {
+                    // Check if already in orbit
+                    if !e.to_string().contains("already in orbit") {
+                        return Err(ShipActorError(format!("Failed to orbit before navigation: {}", e)));
+                    }
+                }
+            }
+        }
         
         // Check fuel safety before navigation
         match self.navigation_planner.can_navigate_safely(&ship, destination).await {

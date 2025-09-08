@@ -202,7 +202,18 @@ impl FleetCoordinator {
                         println!("🎖️ {} (Priority: {:.2}) -> {}", ship_symbol, metrics.priority_weight, recommended_task);
                         
                         // Priority-based task assignment
-                        if self.needs_refuel(&ship) {
+                        // Check if this is a probe/satellite first - they can't move and need special handling
+                        if self.is_probe(&ship) {
+                            // Probes can only scan, they cannot move
+                            if ship.fuel.capacity == 0 {
+                                println!("🛰️ {} is a stationary satellite - can only scan from current location", ship_symbol);
+                                // Only assign scanning tasks from current location
+                                self.assign_stationary_scanning_task(&ship).await?;
+                            } else {
+                                println!("🔭 {} is a probe - assigning exploration", ship_symbol);
+                                self.assign_exploration_task(&ship).await?;
+                            }
+                        } else if self.needs_refuel(&ship) {
                             println!("⛽ {} needs fuel ({}/{})", ship_symbol, ship.fuel.current, ship.fuel.capacity);
                             self.assign_refuel_task(&ship).await?;
                         } else if self.has_contract_materials(&ship, &needed_materials) {
@@ -211,12 +222,9 @@ impl FleetCoordinator {
                         } else if self.is_cargo_full(&ship) {
                             println!("🗃️ {} cargo full - need to manage inventory", ship_symbol);
                             self.assign_cargo_management(&ship, contract).await?;
-                        } else if metrics.capabilities.can_mine && metrics.contract_contribution >= 0.05 && !self.is_probe(&ship) {
+                        } else if metrics.capabilities.can_mine && metrics.contract_contribution >= 0.05 {
                             println!("⛏️ {} assigned to mining (priority: {:.2})", ship_symbol, metrics.priority_weight);
                             self.assign_mining_task(&ship, &needed_materials, &contract.id).await?;
-                        } else if metrics.capabilities.can_explore {
-                            println!("🛰️ {} assigned to exploration", ship_symbol);
-                            self.assign_exploration_task(&ship).await?;
                         } else if metrics.capabilities.can_trade {
                             println!("🏪 {} assigned to support operations (trading ready)", ship_symbol);
                         }
@@ -280,6 +288,38 @@ impl FleetCoordinator {
         };
         
         self.send_action_to_ship(&ship.symbol, exploration_action).await?;
+        Ok(())
+    }
+
+    async fn assign_stationary_scanning_task(&mut self, ship: &Ship) -> Result<(), Box<dyn std::error::Error>> {
+        println!("📡 {} is stationary - checking current location for survey compatibility", ship.symbol);
+        
+        // Get current waypoint details to check if it can be surveyed
+        let system_symbol = &ship.nav.system_symbol;
+        let current_waypoint = self.client.get_waypoint(system_symbol, &ship.nav.waypoint_symbol).await?;
+        
+        // Check if current location is suitable for surveying (ASTEROID, ASTEROID_FIELD, ENGINEERED_ASTEROID)
+        let surveyable_types = ["ASTEROID", "ASTEROID_FIELD", "ENGINEERED_ASTEROID"];
+        
+        if surveyable_types.contains(&current_waypoint.waypoint_type.as_str()) {
+            println!("📡 {} scanning from current location {} ({})", ship.symbol, ship.nav.waypoint_symbol, current_waypoint.waypoint_type);
+            let survey_action = ShipAction::Survey {
+                target: ship.nav.waypoint_symbol.clone(),
+            };
+            self.send_action_to_ship(&ship.symbol, survey_action).await?;
+        } else {
+            // If current location isn't surveyable, assign waypoint scanning instead
+            println!("📡 {} current location {} ({}) not surveyable - performing waypoint scan instead", 
+                    ship.symbol, ship.nav.waypoint_symbol, current_waypoint.waypoint_type);
+            
+            // Create a waypoint scan action (this scans for nearby waypoints, not resource surveys)
+            // Since we can't move, we just report that the satellite is monitoring
+            println!("🛰️ {} monitoring space from stationary position at {}", ship.symbol, ship.nav.waypoint_symbol);
+            
+            // For now, just mark the satellite as idle - we could implement passive monitoring later
+            // No action needed - the satellite will get reassigned in the next cycle
+        }
+        
         Ok(())
     }
 

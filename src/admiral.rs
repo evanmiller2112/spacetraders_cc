@@ -7,6 +7,7 @@ use std::fs;
 pub struct Admiral {
     pub client: SpaceTradersClient,
     debug_mode: bool,
+    full_debug: bool,
 }
 
 impl Admiral {
@@ -15,6 +16,7 @@ impl Admiral {
         Self { 
             client,
             debug_mode: false,
+            full_debug: false,
         }
     }
     
@@ -27,7 +29,17 @@ impl Admiral {
         self.client.set_api_logging(logging);
     }
 
+    pub fn set_full_debug(&mut self, full_debug: bool) {
+        self.full_debug = full_debug;
+        crate::debug::set_full_debug(full_debug);
+        if full_debug {
+            println!("🐛 FULL DEBUG MODE ENABLED - All function calls will be logged");
+        }
+    }
+
     pub async fn run_autonomous_cycle(&self) -> Result<(), Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("Admiral::run_autonomous_cycle");
+        
         println!("🎖️  Admiral starting complete autonomous operations cycle...");
         println!("🎯 PRIME DIRECTIVE: 100% autonomous gameplay - no user interaction");
         println!("🚀 Using advanced fleet coordination with per-ship action queues...");
@@ -157,7 +169,9 @@ impl Admiral {
         println!("  ✅ PROBE exploration");
         println!("  ✅ Fleet analysis");
         
-        Ok(())
+        let result = Ok(());
+        crate::debug_fn_exit!("Admiral::run_autonomous_cycle", &result);
+        result
     }
     
     pub async fn debug_waypoints(&self, system_symbol: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -434,6 +448,8 @@ impl Admiral {
     }
 
     pub async fn run_continuous_operations(&self) -> Result<(), Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("Admiral::run_continuous_operations");
+        
         println!("🎖️  Admiral starting CONTINUOUS autonomous operations...");
         println!("⚠️  This will run indefinitely - Press Ctrl+C to stop");
         println!("🌟 SpaceTraders Autonomous Agent v0.1.1 - Fully Autonomous Gameplay");
@@ -485,12 +501,17 @@ impl Admiral {
         
         // Run operations with Ctrl+C handling
         tokio::select! {
-            result = operations => result,
+            result = operations => {
+                crate::debug_fn_exit!("Admiral::run_continuous_operations", &result);
+                result
+            },
             _ = ctrl_c => {
                 println!("\n🛑 CTRL+C RECEIVED - Graceful shutdown initiated");
                 println!("🎖️  Admiral reporting: Operations terminated by user command");
                 println!("📊 Total cycles completed: {}", cycle_count);
-                Ok(())
+                let result = Ok(());
+                crate::debug_fn_exit!("Admiral::run_continuous_operations", &result);
+                result
             }
         }
     }

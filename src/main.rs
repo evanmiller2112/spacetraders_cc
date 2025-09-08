@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut admiral = Admiral::new(token);
     admiral.set_debug_mode(args.debug_api);
     admiral.set_api_logging(args.debug_api_log);
+    admiral.set_full_debug(args.full_debug);
     
     // Test authentication first
     let agent = match admiral.client.get_agent().await {
