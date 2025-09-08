@@ -211,7 +211,7 @@ impl FleetCoordinator {
                         } else if self.is_cargo_full(&ship) {
                             println!("🗃️ {} cargo full - need to manage inventory", ship_symbol);
                             self.assign_cargo_management(&ship, contract).await?;
-                        } else if metrics.capabilities.can_mine && metrics.contract_contribution >= 0.05 {
+                        } else if metrics.capabilities.can_mine && metrics.contract_contribution >= 0.05 && !self.is_probe(&ship) {
                             println!("⛏️ {} assigned to mining (priority: {:.2})", ship_symbol, metrics.priority_weight);
                             self.assign_mining_task(&ship, &needed_materials, &contract.id).await?;
                         } else if metrics.capabilities.can_explore {
@@ -243,9 +243,9 @@ impl FleetCoordinator {
     }
 
     async fn assign_mining_task(&mut self, ship: &Ship, needed_materials: &[String], contract_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Find suitable mining location
+        // Find suitable mining location using cached waypoints
         let system_symbol = ship.nav.waypoint_symbol.split('-').take(2).collect::<Vec<&str>>().join("-");
-        let waypoints = self.client.get_system_waypoints(&system_symbol, None).await?;
+        let waypoints = self.get_system_waypoints_cached(&system_symbol).await?;
         
         // Find best asteroid field
         let asteroid_fields: Vec<_> = waypoints.into_iter()
@@ -403,50 +403,19 @@ impl FleetCoordinator {
     }
 
     async fn find_nearest_refuel_station(&mut self, ship: &Ship) -> Result<String, Box<dyn std::error::Error>> {
-        // Get current system waypoints - check cache first
+        // Use the unified fuel station finder
         let system_symbol = &ship.nav.system_symbol;
-        let waypoints = self.get_system_waypoints_cached(system_symbol).await?;
-        
-        // Find stations with fuel facilities
-        let mut fuel_stations = Vec::new();
-        for waypoint in waypoints {
-            if waypoint.traits.iter().any(|trait_| 
-                trait_.symbol == "FUEL_STATION" || 
-                trait_.symbol == "MARKETPLACE" ||
-                trait_.symbol == "SHIPYARD"
-            ) {
-                fuel_stations.push(waypoint);
-            }
-        }
-        
-        if fuel_stations.is_empty() {
-            // Fallback to headquarters if no fuel stations found
-            println!("⚠️ No fuel stations found in {}, using headquarters", system_symbol);
-            return Ok("X1-DC46-A1".to_string());
-        }
-        
-        // Calculate distances and find nearest
         let ship_x = ship.nav.route.destination.x;
         let ship_y = ship.nav.route.destination.y;
         
-        let mut nearest_station = &fuel_stations[0];
-        let mut min_distance = f64::MAX;
-        
-        for station in &fuel_stations {
-            let dx = (station.x - ship_x) as f64;
-            let dy = (station.y - ship_y) as f64;
-            let distance = (dx * dx + dy * dy).sqrt();
-            
-            if distance < min_distance {
-                min_distance = distance;
-                nearest_station = station;
+        match self.find_fuel_station(system_symbol, ship_x, ship_y, &ship.symbol).await? {
+            Some(station) => Ok(station),
+            None => {
+                // Fallback to headquarters if no fuel stations found
+                println!("⚠️ No fuel stations found in {}, using headquarters", system_symbol);
+                Ok("X1-DC46-A1".to_string())
             }
         }
-        
-        println!("🔍 Found {} fuel stations, nearest is {} (distance: {:.1})", 
-                fuel_stations.len(), nearest_station.symbol, min_distance);
-        
-        Ok(nearest_station.symbol.clone())
     }
 
     async fn assign_cargo_management(&mut self, ship: &Ship, contract: &Contract) -> Result<(), Box<dyn std::error::Error>> {
@@ -501,49 +470,19 @@ impl FleetCoordinator {
     }
 
     async fn find_nearest_marketplace(&mut self, ship: &Ship) -> Result<String, Box<dyn std::error::Error>> {
-        // Get current system waypoints - check cache first
+        // Use the unified marketplace finder
         let system_symbol = &ship.nav.system_symbol;
-        let waypoints = self.get_system_waypoints_cached(system_symbol).await?;
-        
-        // Find marketplaces
-        let mut marketplaces = Vec::new();
-        for waypoint in waypoints {
-            if waypoint.traits.iter().any(|trait_| 
-                trait_.symbol == "MARKETPLACE" ||
-                trait_.symbol == "SHIPYARD"
-            ) {
-                marketplaces.push(waypoint);
-            }
-        }
-        
-        if marketplaces.is_empty() {
-            // Fallback to headquarters if no marketplaces found
-            println!("⚠️ No marketplaces found in {}, using headquarters", system_symbol);
-            return Ok("X1-DC46-A1".to_string());
-        }
-        
-        // Calculate distances and find nearest
         let ship_x = ship.nav.route.destination.x;
         let ship_y = ship.nav.route.destination.y;
         
-        let mut nearest_marketplace = &marketplaces[0];
-        let mut min_distance = f64::MAX;
-        
-        for marketplace in &marketplaces {
-            let dx = (marketplace.x - ship_x) as f64;
-            let dy = (marketplace.y - ship_y) as f64;
-            let distance = (dx * dx + dy * dy).sqrt();
-            
-            if distance < min_distance {
-                min_distance = distance;
-                nearest_marketplace = marketplace;
+        match self.find_marketplace(system_symbol, ship_x, ship_y, &ship.symbol).await? {
+            Some(marketplace) => Ok(marketplace),
+            None => {
+                // Fallback to headquarters if no marketplaces found
+                println!("⚠️ No marketplaces found in {}, using headquarters", system_symbol);
+                Ok("X1-DC46-A1".to_string())
             }
         }
-        
-        println!("🏪 Found {} marketplaces, nearest is {} (distance: {:.1})", 
-                marketplaces.len(), nearest_marketplace.symbol, min_distance);
-        
-        Ok(nearest_marketplace.symbol.clone())
     }
 
     // Helper method to get system waypoints - checks cache first
@@ -574,13 +513,116 @@ impl FleetCoordinator {
         }
     }
 
-    pub fn find_nearest_marketplace_cached(&mut self, system_symbol: &str, from_x: i32, from_y: i32) -> Option<String> {
-        if let Some(waypoint) = self.survey_cache.find_nearest_waypoint_with_trait(
-            system_symbol, "MARKETPLACE", from_x, from_y
-        ) {
-            Some(waypoint.symbol.clone())
+    /// UNIFIED WAYPOINT FINDER - Single source of truth for finding waypoints with specific traits
+    /// Cache-first approach: checks cache -> scans if needed -> returns nearest matching waypoint
+    pub async fn find_waypoint_with_trait(&mut self, system_symbol: &str, from_x: i32, from_y: i32, trait_symbols: &[&str], scanning_ship_symbol: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        // 1. Check cache first (if not stale)
+        if !self.survey_cache.should_scan_system(system_symbol) {
+            if let Some(cached_waypoints) = self.survey_cache.get_cached_waypoints(system_symbol) {
+                // Check if cached data has the requested traits
+                let has_requested_traits = cached_waypoints.iter().any(|w| 
+                    w.traits.iter().any(|t| trait_symbols.contains(&t.symbol.as_str()))
+                );
+                
+                if has_requested_traits {
+                    // Use cached data to find nearest waypoint with requested trait
+                    for trait_symbol in trait_symbols {
+                        if let Some(waypoint) = self.survey_cache.find_nearest_waypoint_with_trait(
+                            system_symbol, trait_symbol, from_x, from_y
+                        ) {
+                            println!("📋 Found {} in cache: {}", trait_symbol, waypoint.symbol);
+                            return Ok(Some(waypoint.symbol.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 2. Cache miss or stale - scan for fresh data
+        println!("🔍 Cache miss for {}, scanning for waypoints with traits: {:?}", system_symbol, trait_symbols);
+        let waypoints = self.scan_and_cache_waypoints(system_symbol, scanning_ship_symbol).await?;
+        
+        // 3. Find nearest waypoint with requested traits from fresh data
+        let mut nearest_waypoint: Option<&crate::models::Waypoint> = None;
+        let mut min_distance = f64::MAX;
+        
+        for waypoint in &waypoints {
+            if waypoint.traits.iter().any(|trait_| 
+                trait_symbols.contains(&trait_.symbol.as_str())
+            ) {
+                let dx = (waypoint.x - from_x) as f64;
+                let dy = (waypoint.y - from_y) as f64;
+                let distance = (dx * dx + dy * dy).sqrt();
+                
+                if distance < min_distance {
+                    min_distance = distance;
+                    nearest_waypoint = Some(waypoint);
+                }
+            }
+        }
+        
+        if let Some(waypoint) = nearest_waypoint {
+            let trait_names: Vec<_> = waypoint.traits.iter()
+                .filter(|t| trait_symbols.contains(&t.symbol.as_str()))
+                .map(|t| &t.symbol)
+                .collect();
+            println!("🏪 Found nearest waypoint with traits {:?}: {} (distance: {:.1})", 
+                    trait_names, waypoint.symbol, min_distance);
+            Ok(Some(waypoint.symbol.clone()))
         } else {
-            None
+            println!("❌ No waypoints with traits {:?} found in {}", trait_symbols, system_symbol);
+            Ok(None)
         }
     }
+    
+    /// Convenience method for finding marketplaces
+    pub async fn find_marketplace(&mut self, system_symbol: &str, from_x: i32, from_y: i32, scanning_ship_symbol: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        self.find_waypoint_with_trait(system_symbol, from_x, from_y, &["MARKETPLACE", "SHIPYARD"], scanning_ship_symbol).await
+    }
+    
+    /// Convenience method for finding fuel stations
+    pub async fn find_fuel_station(&mut self, system_symbol: &str, from_x: i32, from_y: i32, scanning_ship_symbol: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        self.find_waypoint_with_trait(system_symbol, from_x, from_y, &["FUEL_STATION", "MARKETPLACE", "SHIPYARD"], scanning_ship_symbol).await
+    }
+    
+    /// Scan waypoints for detailed trait data and cache the results
+    /// This ensures we get full trait information including MARKETPLACE
+    async fn scan_and_cache_waypoints(&mut self, system_symbol: &str, scanning_ship: &str) -> Result<Vec<crate::models::Waypoint>, Box<dyn std::error::Error>> {
+        println!("🔬 {} scanning waypoints in {} for detailed trait data", scanning_ship, system_symbol);
+        
+        // Use the scanning API to get full waypoint data with traits
+        let scanned_waypoints = self.client.scan_waypoints(scanning_ship).await?;
+        
+        // Convert scanned waypoints to regular waypoints for caching
+        let waypoints: Vec<crate::models::Waypoint> = scanned_waypoints.into_iter().map(|sw| {
+            crate::models::Waypoint {
+                symbol: sw.symbol,
+                waypoint_type: sw.waypoint_type,
+                system_symbol: sw.system_symbol,
+                x: sw.x,
+                y: sw.y,
+                orbitals: sw.orbitals,
+                traits: sw.traits,
+                chart: sw.chart,
+                faction: sw.faction,
+            }
+        }).collect();
+        
+        // Validate scanned data quality
+        let waypoints_with_traits = waypoints.iter().filter(|w| !w.traits.is_empty()).count();
+        println!("📊 Scanned {} waypoints, {} have trait data", waypoints.len(), waypoints_with_traits);
+        
+        // Cache the waypoint data
+        self.survey_cache.cache_system_waypoints(system_symbol, waypoints.clone())?;
+        
+        let marketplace_count = waypoints.iter().filter(|w| 
+            w.traits.iter().any(|t| t.symbol == "MARKETPLACE")
+        ).count();
+        
+        println!("📡 Scanned {} waypoints in {}, found {} with MARKETPLACE trait", 
+                waypoints.len(), system_symbol, marketplace_count);
+        
+        Ok(waypoints)
+    }
+    
 }

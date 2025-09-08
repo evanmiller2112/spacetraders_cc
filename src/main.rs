@@ -13,6 +13,9 @@ struct Args {
     
     #[arg(long, help = "Log all API calls and responses to a file")]
     debug_api_log: bool,
+    
+    #[arg(long, help = "Enable comprehensive function call logging")]
+    full_debug: bool,
 }
 
 #[tokio::main]

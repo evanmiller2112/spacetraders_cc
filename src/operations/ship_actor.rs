@@ -1,7 +1,7 @@
 // Ship Actor System - Per-ship asynchronous action queues
 use crate::client::SpaceTradersClient;
 use crate::models::*;
-use crate::operations::ShipOperations;
+use crate::operations::{ShipOperations, NavigationPlanner};
 use crate::storage::CooldownStore;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep};
@@ -87,6 +87,7 @@ pub struct ShipActor {
     action_receiver: mpsc::UnboundedReceiver<ShipAction>,
     status_sender: mpsc::UnboundedSender<(String, ShipState)>,
     client: SpaceTradersClient,
+    navigation_planner: NavigationPlanner,
     cooldown_until: Option<Instant>,
     cooldown_store: CooldownStore,
 }
@@ -100,12 +101,14 @@ impl ShipActor {
     ) -> Self {        
         let storage_path = format!("storage/cooldowns_{}.json", ship_symbol);
         let cooldown_store = CooldownStore::new(&storage_path);
+        let navigation_planner = NavigationPlanner::new(client.clone());
         
         Self {
             ship_symbol,
             action_receiver,
             status_sender,
             client,
+            navigation_planner,
             cooldown_until: None,
             cooldown_store,
         }
@@ -241,9 +244,30 @@ impl ShipActor {
         self.send_status(status).await;
     }
 
-    async fn execute_mining(&mut self, _target: &str, needed_materials: &[String]) -> Result<(), ShipActorError> {
-        // Simplified mining that avoids Send issues
-        println!("🎲 {} performing direct extraction", self.ship_symbol);
+    async fn execute_mining(&mut self, target: &str, needed_materials: &[String]) -> Result<(), ShipActorError> {
+        // First, check if we're at the mining location
+        let ship = match self.client.get_ship(&self.ship_symbol).await {
+            Ok(ship) => ship,
+            Err(e) => return Err(ShipActorError(format!("Could not get ship data: {}", e)))
+        };
+        
+        // Navigate to target if we're not already there
+        if ship.nav.waypoint_symbol != target {
+            println!("🧭 {} navigating to mining target {}", self.ship_symbol, target);
+            if let Err(e) = self.execute_navigation(target).await {
+                return Err(ShipActorError(format!("Failed to navigate to mining location {}: {}", target, e)));
+            }
+            
+            // Need to dock/orbit appropriately for mining
+            match self.client.orbit_ship(&self.ship_symbol).await {
+                Ok(_) => println!("🛸 {} in orbit for mining", self.ship_symbol),
+                Err(e) => println!("⚠️ {} orbit failed (may already be in orbit): {}", self.ship_symbol, e)
+            }
+        } else {
+            println!("✅ {} already at mining target {}", self.ship_symbol, target);
+        }
+        
+        println!("⛏️ {} performing extraction at {}", self.ship_symbol, target);
         
         match self.client.extract_resources(&self.ship_symbol).await {
             Ok(extraction_data) => {
@@ -369,6 +393,32 @@ impl ShipActor {
     }
 
     async fn execute_navigation(&mut self, destination: &str) -> Result<(), ShipActorError> {
+        // Get current ship data for fuel check
+        let ship = match self.client.get_ship(&self.ship_symbol).await {
+            Ok(ship) => ship,
+            Err(e) => return Err(ShipActorError(format!("Could not get ship data: {}", e)))
+        };
+        
+        // Check fuel safety before navigation
+        match self.navigation_planner.can_navigate_safely(&ship, destination).await {
+            Ok(safety_check) => {
+                if !safety_check.is_safe {
+                    println!("⛽ {} navigation BLOCKED: {}", self.ship_symbol, safety_check.reason);
+                    if let Some(fuel_source) = safety_check.nearest_fuel_source {
+                        println!("💡 {} should refuel at {} first", self.ship_symbol, fuel_source);
+                    }
+                    return Err(ShipActorError(format!("Insufficient fuel: {}", safety_check.reason)));
+                }
+                
+                println!("✅ {} fuel check passed: {}", self.ship_symbol, safety_check.reason);
+            }
+            Err(e) => {
+                println!("⚠️ {} fuel safety check failed: {}, proceeding with caution", self.ship_symbol, e);
+                // Continue but warn - this might be due to API issues
+            }
+        }
+        
+        // Proceed with navigation
         match self.client.navigate_ship(&self.ship_symbol, destination).await {
             Ok(_) => {
                 println!("🧭 {} navigating to {}", self.ship_symbol, destination);

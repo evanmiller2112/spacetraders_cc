@@ -125,11 +125,27 @@ impl ShipPrioritizer {
     fn calculate_contract_contribution(&self, ship: &Ship, needed_materials: &[String], contract: &Contract) -> f64 {
         let capabilities = self.analyze_ship_capabilities(ship);
         
-        if !capabilities.can_mine {
-            return 0.1; // Non-mining ships have minimal direct contract contribution
+        // Determine if this contract requires mining or can be fulfilled through other means
+        let requires_mining = self.contract_requires_mining(needed_materials);
+        
+        if requires_mining && !capabilities.can_mine {
+            // This is a mining contract but ship can't mine - zero contribution
+            return 0.0;
         }
         
-        // Calculate how much this ship can contribute to contract materials
+        if !requires_mining {
+            // Non-mining contract - all ships can potentially contribute through trading/transport
+            // Base contribution on cargo capacity and trading capability
+            if capabilities.can_trade || capabilities.can_haul {
+                return (capabilities.cargo_capacity as f64 / 100.0).min(0.8);
+            } else if capabilities.can_explore {
+                // Probes can still transport small amounts or scout markets
+                return 0.1;
+            }
+            return 0.0;
+        }
+        
+        // This is a mining contract and ship can mine - calculate mining contribution
         let total_needed: i32 = contract.terms.deliver.iter().map(|d| d.units_required).sum();
         let ship_capacity = capabilities.cargo_capacity;
         
@@ -142,6 +158,21 @@ impl ShipPrioritizer {
         // Contract contribution score (0.0 to 1.0)
         let contribution = (mining_efficiency * ship_capacity as f64) / (cycles_per_ship * 100.0);
         contribution.min(1.0).max(0.0)
+    }
+    
+    /// Determine if contract materials are typically obtained through mining
+    fn contract_requires_mining(&self, needed_materials: &[String]) -> bool {
+        // List of commonly mined materials in SpaceTraders
+        let mineable_materials = [
+            "IRON_ORE", "COPPER_ORE", "ALUMINUM_ORE", "GOLD_ORE", "PLATINUM_ORE",
+            "SILVER_ORE", "URANIUM_ORE", "PRECIOUS_STONES", "QUARTZ_SAND",
+            "SILICON_CRYSTALS", "DIAMONDS", "HYDROCARBON", "LIQUID_HYDROGEN"
+        ];
+        
+        // If any needed material is mineable, this is likely a mining contract
+        needed_materials.iter().any(|material| {
+            mineable_materials.iter().any(|mineable| material.contains(mineable))
+        })
     }
 
     fn estimate_income_generation(&self, ship: &Ship, capabilities: &ShipCapabilities) -> f64 {

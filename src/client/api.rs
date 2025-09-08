@@ -95,6 +95,30 @@ impl SpaceTradersClient {
         }
     }
 
+    // Scanning operations
+    pub async fn scan_waypoints(&self, ship_symbol: &str) -> Result<Vec<ScannedWaypoint>, Box<dyn std::error::Error>> {
+        let url = format!("{}/my/ships/{}/scan/waypoints", API_BASE_URL, ship_symbol);
+        
+        if !self.request_approval("POST", &url, Some("{}")).await {
+            return Err("API call not approved".into());
+        }
+        
+        let response = self.client.post(&url).json(&serde_json::json!({})).send().await?;
+        let status = response.status().as_u16();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("POST", &url, Some("{}"), status, Some(&error_body));
+            return Err(format!("Waypoint scan failed with status: {}", status).into());
+        }
+
+        let response_text = response.text().await?;
+        self.log_api_call("POST", &url, Some("{}"), status, Some(&response_text));
+        
+        let scan_response: WaypointScanResponse = serde_json::from_str(&response_text)?;
+        Ok(scan_response.data.waypoints)
+    }
+
     // Agent operations
     pub async fn get_agent(&self) -> Result<Agent, Box<dyn std::error::Error>> {
         let url = format!("{}/my/agent", API_BASE_URL);

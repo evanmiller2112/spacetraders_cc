@@ -100,3 +100,29 @@ pub struct ShipyardResponse {
 pub struct ShipPurchaseResponse {
     pub data: crate::models::ShipPurchaseData,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct WaypointScanResponse {
+    pub data: WaypointScanData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WaypointScanData {
+    pub cooldown: crate::models::ShipCooldown,
+    pub waypoints: Vec<ScannedWaypoint>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScannedWaypoint {
+    pub symbol: String,
+    #[serde(rename = "type")]
+    pub waypoint_type: String,
+    #[serde(rename = "systemSymbol")]
+    pub system_symbol: String,
+    pub x: i32,
+    pub y: i32,
+    pub orbitals: Vec<crate::models::waypoint::Orbital>,
+    pub traits: Vec<crate::models::waypoint::Trait>,
+    pub chart: Option<crate::models::waypoint::Chart>,
+    pub faction: Option<crate::models::waypoint::WaypointFaction>,
+}
