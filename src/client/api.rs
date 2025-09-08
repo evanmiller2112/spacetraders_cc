@@ -2,9 +2,10 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use crate::models::*;
 use crate::API_BASE_URL;
 
+#[derive(Clone)]
 pub struct SpaceTradersClient {
     client: reqwest::Client,
-    token: String,
+    pub token: String,
 }
 
 impl SpaceTradersClient {
@@ -137,6 +138,20 @@ impl SpaceTradersClient {
 
         let ships_response: ShipsResponse = response.json().await?;
         Ok(ships_response.data)
+    }
+
+    pub async fn get_ship(&self, ship_symbol: &str) -> Result<Ship, Box<dyn std::error::Error>> {
+        let url = format!("{}/my/ships/{}", API_BASE_URL, ship_symbol);
+        let response = self.client.get(&url).send().await?;
+        
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read error response".to_string());
+            return Err(format!("Get ship failed with status {}: {}", status, error_body).into());
+        }
+
+        let ship_response: ShipResponse = response.json().await?;
+        Ok(ship_response.data)
     }
 
     pub async fn orbit_ship(&self, ship_symbol: &str) -> Result<ShipNav, Box<dyn std::error::Error>> {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Ship {
     pub symbol: String,
     pub registration: ShipRegistration,
@@ -16,7 +16,7 @@ pub struct Ship {
     pub fuel: ShipFuel,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipRegistration {
     pub name: String,
     #[serde(rename = "factionSymbol")]
@@ -24,7 +24,7 @@ pub struct ShipRegistration {
     pub role: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipNav {
     #[serde(rename = "systemSymbol")]
     pub system_symbol: String,
@@ -36,7 +36,7 @@ pub struct ShipNav {
     pub flight_mode: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipRoute {
     pub destination: ShipRouteWaypoint,
     pub origin: ShipRouteWaypoint,
@@ -45,7 +45,7 @@ pub struct ShipRoute {
     pub arrival: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipRouteWaypoint {
     pub symbol: String,
     #[serde(rename = "type")]
@@ -56,7 +56,7 @@ pub struct ShipRouteWaypoint {
     pub y: i32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipCrew {
     pub current: i32,
     pub required: i32,
@@ -66,7 +66,7 @@ pub struct ShipCrew {
     pub wages: i32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipFrame {
     pub symbol: String,
     pub name: String,
@@ -82,7 +82,7 @@ pub struct ShipFrame {
     pub requirements: ShipRequirements,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipModule {
     pub symbol: String,
     pub capacity: Option<i32>,
@@ -92,7 +92,7 @@ pub struct ShipModule {
     pub requirements: ShipRequirements,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipMount {
     pub symbol: String,
     pub name: String,
@@ -102,14 +102,14 @@ pub struct ShipMount {
     pub requirements: ShipRequirements,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipRequirements {
     pub power: Option<i32>,
     pub crew: Option<i32>,
     pub slots: Option<i32>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipCooldown {
     #[serde(rename = "shipSymbol")]
     pub ship_symbol: String,
@@ -120,14 +120,14 @@ pub struct ShipCooldown {
     pub expiration: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipCargo {
     pub capacity: i32,
     pub units: i32,
     pub inventory: Vec<CargoItem>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CargoItem {
     pub symbol: String,
     pub name: String,
@@ -135,28 +135,28 @@ pub struct CargoItem {
     pub units: i32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipFuel {
     pub current: i32,
     pub capacity: i32,
     pub consumed: Option<ShipFuelConsumed>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipFuelConsumed {
     pub amount: i32,
     pub timestamp: String,
 }
 
 // Navigation-related structures
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NavigationData {
     pub fuel: ShipFuel,
     pub nav: ShipNav,
 }
 
 // Shipyard-related structures
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Shipyard {
     pub symbol: String,
     #[serde(rename = "shipTypes")]
@@ -167,13 +167,13 @@ pub struct Shipyard {
     pub modifications_fee: i32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipyardShipType {
     #[serde(rename = "type")]
     pub ship_type: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipyardTransaction {
     #[serde(rename = "waypointSymbol")]
     pub waypoint_symbol: String,
@@ -185,7 +185,7 @@ pub struct ShipyardTransaction {
     pub timestamp: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipyardShip {
     #[serde(rename = "type")]
     pub ship_type: String,
@@ -201,20 +201,20 @@ pub struct ShipyardShip {
     pub crew: ShipCrewRequirements,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipCrewRequirements {
     pub required: i32,
     pub capacity: i32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipPurchaseData {
     pub agent: crate::models::Agent,
     pub ship: Ship,
     pub transaction: ShipPurchaseTransaction,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShipPurchaseTransaction {
     #[serde(rename = "waypointSymbol")]
     pub waypoint_symbol: String,
@@ -229,7 +229,7 @@ pub struct ShipPurchaseTransaction {
 }
 
 // Agent structure (ship-related context)
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Agent {
     #[serde(rename = "accountId")]
     pub account_id: String,

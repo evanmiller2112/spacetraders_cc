@@ -32,6 +32,11 @@ pub struct ShipsResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ShipResponse {
+    pub data: crate::models::Ship,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct NavigationResponse {
     pub data: crate::models::NavigationData,
 }

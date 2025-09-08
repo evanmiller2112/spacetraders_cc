@@ -17,6 +17,7 @@ impl Admiral {
     pub async fn run_autonomous_cycle(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("🎖️  Admiral starting complete autonomous operations cycle...");
         println!("🎯 PRIME DIRECTIVE: 100% autonomous gameplay - no user interaction");
+        println!("🚀 Using advanced fleet coordination with per-ship action queues...");
         
         // Use operations modules
         use crate::operations::*;
@@ -53,41 +54,28 @@ impl Admiral {
             }
         };
         
-        // Step 3: Mining fleet deployment and operations
-        println!("\n═══ STEP 3: Mining Operations ═══");
-        let mining_ops = MiningOperations::new(&self.client);
-        let mining_ships = fleet_ops.get_mining_ships(&ships);
+        // Step 3: Advanced Fleet Coordination
+        println!("\n═══ STEP 3: Advanced Fleet Coordination ═══");
         
-        if mining_ships.is_empty() {
-            println!("⚠️  No mining ships available");
-            return Ok(());
+        // Create and initialize fleet coordinator
+        let mut fleet_coordinator = FleetCoordinator::new(self.client.clone());
+        fleet_coordinator.initialize_fleet().await?;
+        
+        println!("🎯 Starting autonomous fleet operations with per-ship action queues");
+        
+        // Run autonomous operations for limited cycles (instead of infinite loop)
+        let coordination_result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(300), // 5 minutes max per cycle
+            fleet_coordinator.run_autonomous_operations(&active_contract)
+        ).await;
+        
+        match coordination_result {
+            Ok(_) => println!("✅ Fleet coordination cycle completed successfully"),
+            Err(_) => println!("⏰ Fleet coordination cycle timed out - continuing to next step"),
         }
         
-        // Get contract materials and find suitable asteroid fields
+        // Get contract materials for remaining operations
         let needed_materials = contract_ops.get_required_materials(&active_contract);
-        println!("🎯 Contract requires: {:?}", needed_materials);
-        
-        // Extract system from ship location
-        let system_symbol = if let Some(first_ship) = ships.first() {
-            let waypoint_parts: Vec<&str> = first_ship.nav.waypoint_symbol.split('-').collect();
-            format!("{}-{}", waypoint_parts[0], waypoint_parts[1])
-        } else {
-            return Err("No ships available".into());
-        };
-        
-        let asteroid_fields = mining_ops.find_asteroid_fields(&system_symbol, &needed_materials).await?;
-        
-        if asteroid_fields.is_empty() {
-            println!("❌ No suitable asteroid fields found");
-            return Ok(());
-        }
-        
-        // Deploy fleet to mining positions
-        let mining_ships_owned: Vec<Ship> = mining_ships.into_iter().cloned().collect();
-        let ready_miners = fleet_ops.coordinate_fleet_operations(&mining_ships_owned, &asteroid_fields).await?;
-        
-        // Execute parallel mining operations
-        mining_ops.execute_parallel_survey_mining(&ready_miners, &needed_materials, &active_contract, 10).await?;
         
         // Step 4: Cargo trading operations
         println!("\n═══ STEP 4: Cargo Trading ═══");
@@ -107,8 +95,35 @@ impl Admiral {
             println!("📦 Contract in progress - more materials needed");
         }
         
-        // Step 6: Fleet expansion analysis
-        println!("\n═══ STEP 6: Fleet Expansion Analysis ═══");
+        // Step 6: PROBE Exploration for Shipyards
+        println!("\n═══ STEP 6: PROBE Shipyard Exploration ═══");
+        let exploration_ops = ExplorationOperations::new(&self.client);
+        let updated_ships_for_probes = fleet_ops.get_all_ships().await?;
+        let probe_ships = exploration_ops.get_probe_ships(&updated_ships_for_probes);
+        
+        if !probe_ships.is_empty() {
+            println!("🛰️  {} PROBE ship(s) available for exploration", probe_ships.len());
+            match exploration_ops.explore_nearby_systems_for_shipyards(&probe_ships).await {
+                Ok(shipyards) => {
+                    if !shipyards.is_empty() {
+                        println!("🎉 PROBE MISSION SUCCESS: Found {} shipyard(s)!", shipyards.len());
+                        for shipyard in &shipyards {
+                            println!("   🚢 Shipyard available at: {}", shipyard);
+                        }
+                    } else {
+                        println!("📍 PROBE MISSION: No new shipyards discovered this cycle");
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️  PROBE exploration failed: {}", e);
+                }
+            }
+        } else {
+            println!("📡 No PROBE ships available for exploration");
+        }
+
+        // Step 7: Fleet expansion analysis
+        println!("\n═══ STEP 7: Fleet Expansion Analysis ═══");
         let updated_agent = self.client.get_agent().await?;
         println!("💰 Current credits: {}", updated_agent.credits);
         
@@ -126,6 +141,7 @@ impl Admiral {
         println!("  ✅ Fleet mining operations");
         println!("  ✅ Cargo trading");
         println!("  ✅ Contract delivery");
+        println!("  ✅ PROBE exploration");
         println!("  ✅ Fleet analysis");
         
         Ok(())
@@ -170,6 +186,192 @@ impl Admiral {
                     candidate.symbol, 
                     candidate.waypoint_type,
                     candidate.traits.iter().map(|t| &t.name).collect::<Vec<_>>());
+        }
+        
+        Ok(())
+    }
+
+    pub async fn debug_ship_capabilities(&self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("🔍 DEBUG: Analyzing all ships for mining capability...");
+        
+        let ships = self.client.get_ships().await?;
+        
+        println!("🚢 Found {} total ships:\n", ships.len());
+        
+        use crate::operations::ShipOperations;
+        let ship_ops = ShipOperations::new(&self.client);
+        
+        for (i, ship) in ships.iter().enumerate() {
+            println!("{}. Ship: {} ({})", i + 1, ship.symbol, ship.registration.name);
+            println!("   📋 Frame: {} - {}", ship.frame.symbol, ship.frame.name);
+            println!("   📦 Cargo Capacity: {} units", ship.cargo.capacity);
+            println!("   🔧 Module Slots: {}", ship.frame.module_slots);
+            println!("   ⚙️  Mounting Points: {}", ship.frame.mounting_points);
+            println!("   ⛽ Fuel Capacity: {}", ship.frame.fuel_capacity);
+            
+            println!("   🎯 Current Role: {}", ship.registration.role);
+            println!("   📍 Location: {}", ship.nav.waypoint_symbol);
+            
+            // Current modules
+            println!("   📦 Current Modules ({}):", ship.modules.len());
+            for module in &ship.modules {
+                println!("      - {} ({})", module.symbol, module.name);
+            }
+            
+            // Current mounts
+            println!("   ⚙️  Current Mounts ({}):", ship.mounts.len());
+            for mount in &ship.mounts {
+                println!("      - {} ({})", mount.symbol, mount.name);
+                if let Some(strength) = mount.strength {
+                    println!("        Strength: {}", strength);
+                }
+                if let Some(deposits) = &mount.deposits {
+                    println!("        Can extract: {:?}", deposits);
+                }
+            }
+            
+            // Mining capability analysis
+            let has_mining = ship_ops.has_mining_capability(ship);
+            let is_hauler = ship_ops.is_hauler(ship);
+            
+            println!("   ⛏️  Mining Capability: {}", if has_mining { "✅ YES" } else { "❌ NO" });
+            println!("   🚛 Hauler Capability: {}", if is_hauler { "✅ YES" } else { "❌ NO" });
+            
+            // Available capacity analysis
+            let available_mounts = ship.frame.mounting_points - ship.mounts.len() as i32;
+            let available_modules = ship.frame.module_slots - ship.modules.len() as i32;
+            
+            println!("   💡 Available Mount Slots: {}", available_mounts);
+            println!("   💡 Available Module Slots: {}", available_modules);
+            
+            if !has_mining && available_mounts > 0 {
+                println!("   🔧 POTENTIAL: Could be equipped with mining mounts!");
+            }
+            
+            println!("");
+        }
+        
+        // Summary
+        let mining_ships = ships.iter().filter(|s| ship_ops.has_mining_capability(s)).count();
+        let hauler_ships = ships.iter().filter(|s| ship_ops.is_hauler(s)).count();
+        let modifiable_ships = ships.iter().filter(|s| {
+            let available_mounts = s.frame.mounting_points - s.mounts.len() as i32;
+            !ship_ops.has_mining_capability(s) && available_mounts > 0
+        }).count();
+        
+        println!("📊 Fleet Summary:");
+        println!("   ⛏️  Ships with mining capability: {}", mining_ships);
+        println!("   🚛 Ships with hauler capability: {}", hauler_ships);
+        println!("   🔧 Ships that could be modified for mining: {}", modifiable_ships);
+        
+        Ok(())
+    }
+
+    pub async fn debug_waypoint_facilities(&self, waypoint_symbol: &str) -> Result<(), Box<dyn std::error::Error>> {
+        println!("🔍 DEBUG: Analyzing waypoint {} for facilities...", waypoint_symbol);
+        
+        // Get waypoint details
+        let system_symbol = waypoint_symbol.split('-').take(2).collect::<Vec<&str>>().join("-");
+        println!("📍 Getting details for waypoint {} in system {}", waypoint_symbol, system_symbol);
+        
+        match self.client.get_system_waypoints(&system_symbol, None).await {
+            Ok(waypoints) => {
+                if let Some(waypoint) = waypoints.iter().find(|w| w.symbol == waypoint_symbol) {
+                    println!("\n🏢 Waypoint: {} (Type: {})", waypoint.symbol, waypoint.waypoint_type);
+                    println!("📍 Coordinates: ({}, {})", waypoint.x, waypoint.y);
+                    
+                    println!("\n🎯 Traits:");
+                    for trait_info in &waypoint.traits {
+                        println!("  - {} ({})", trait_info.name, trait_info.description);
+                    }
+                    
+                    // Check for shipyard
+                    let has_shipyard = waypoint.traits.iter().any(|t| 
+                        t.name.to_lowercase().contains("shipyard") || 
+                        t.description.to_lowercase().contains("shipyard")
+                    );
+                    
+                    // Check for marketplace
+                    let has_marketplace = waypoint.traits.iter().any(|t| 
+                        t.name.to_lowercase().contains("marketplace") || 
+                        t.description.to_lowercase().contains("market")
+                    );
+                    
+                    println!("\n🏪 FACILITIES ANALYSIS:");
+                    println!("  🚢 Shipyard: {}", if has_shipyard { "✅ YES" } else { "❌ NO" });
+                    println!("  🏪 Marketplace: {}", if has_marketplace { "✅ YES" } else { "❌ NO" });
+                    
+                    // If there's a shipyard, try to get shipyard data
+                    if has_shipyard {
+                        println!("\n🚢 SHIPYARD DETECTED! Getting shipyard details...");
+                        match self.client.get_shipyard(&system_symbol, waypoint_symbol).await {
+                            Ok(shipyard) => {
+                                println!("✅ Shipyard accessible!");
+                                println!("🏗️  Available Ship Types: {}", shipyard.ship_types.len());
+                                for ship_type in &shipyard.ship_types {
+                                    println!("    - {}", ship_type.ship_type);
+                                }
+                                
+                                if let Some(ships) = &shipyard.ships {
+                                    println!("🛒 Ships for Sale: {}", ships.len());
+                                    for ship in ships {
+                                        println!("    - {} ({}) - {} credits", 
+                                                ship.name, ship.ship_type, ship.purchase_price);
+                                        println!("      Frame: {} - {}", ship.frame.symbol, ship.frame.name);
+                                        println!("      Cargo: {} units, Mounts: {}, Modules: {}", 
+                                                ship.frame.fuel_capacity, // This might be cargo capacity in the display
+                                                ship.frame.mounting_points,
+                                                ship.frame.module_slots);
+                                    }
+                                } else {
+                                    println!("⚠️  No ships currently for sale");
+                                }
+                                
+                                println!("💰 Modification Fee: {} credits", shipyard.modifications_fee);
+                            }
+                            Err(e) => {
+                                println!("❌ Could not access shipyard details: {}", e);
+                            }
+                        }
+                    }
+                    
+                    // Check nearby waypoints for additional facilities
+                    println!("\n🗺️  NEARBY WAYPOINTS:");
+                    let nearby_waypoints: Vec<_> = waypoints.iter()
+                        .filter(|w| {
+                            let distance = ((w.x - waypoint.x).pow(2) + (w.y - waypoint.y).pow(2)) as f64;
+                            distance.sqrt() <= 100.0 && w.symbol != waypoint.symbol
+                        })
+                        .take(5)
+                        .collect();
+                    
+                    for nearby in nearby_waypoints {
+                        let nearby_shipyard = nearby.traits.iter().any(|t| 
+                            t.name.to_lowercase().contains("shipyard"));
+                        let nearby_marketplace = nearby.traits.iter().any(|t| 
+                            t.name.to_lowercase().contains("marketplace") || 
+                            t.description.to_lowercase().contains("market"));
+                        
+                        let distance = (((nearby.x - waypoint.x).pow(2) + (nearby.y - waypoint.y).pow(2)) as f64).sqrt();
+                        println!("  📍 {} (Type: {}) - Distance: {:.1}", 
+                                nearby.symbol, 
+                                nearby.waypoint_type,
+                                distance);
+                        
+                        if nearby_shipyard || nearby_marketplace {
+                            println!("    🏪 Facilities: {}{}",
+                                    if nearby_shipyard { "🚢 Shipyard " } else { "" },
+                                    if nearby_marketplace { "🏪 Market" } else { "" });
+                        }
+                    }
+                    
+                } else {
+                    println!("❌ Waypoint {} not found in system {}", waypoint_symbol, system_symbol);
+                }
+            }
+            Err(e) => {
+                println!("❌ Failed to get waypoint details: {}", e);
+            }
         }
         
         Ok(())

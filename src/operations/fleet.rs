@@ -157,9 +157,27 @@ impl<'a> FleetOperations<'a> {
             }
         }
         
-        // Wait for all ships to arrive
-        println!("⏳ Waiting for fleet deployment (30 seconds)...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        // Check if any ships are actually navigating
+        let mut ships_navigating = false;
+        let mut max_navigation_time = 0;
+        
+        for (ship, target_asteroid) in &target_assignments {
+            if ship.nav.waypoint_symbol != target_asteroid.symbol {
+                ships_navigating = true;
+                // Estimate navigation time based on distance or use a reasonable default
+                // For now, we'll use a conservative 20 seconds as ships were just given navigation commands
+                max_navigation_time = max_navigation_time.max(20);
+            }
+        }
+        
+        if ships_navigating {
+            println!("⏳ Waiting for {} ships to complete navigation ({} seconds)...", 
+                    target_assignments.iter().filter(|(ship, target)| ship.nav.waypoint_symbol != target.symbol).count(),
+                    max_navigation_time);
+            tokio::time::sleep(tokio::time::Duration::from_secs(max_navigation_time)).await;
+        } else {
+            println!("✅ All ships already at target locations - no deployment wait needed");
+        }
         
         // Assess readiness for mining operations
         self.assess_mining_readiness(target_assignments).await

@@ -33,9 +33,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     
     println!("\n🎖️  Admiral ready for autonomous operations!");
-    println!("🚀 Starting CONTINUOUS autonomous operations...");
+    
+    
+    println!("\n🚀 Starting CONTINUOUS autonomous operations with PROBE exploration...");
     println!("⚠️  This will run indefinitely - Press Ctrl+C to stop");
-    println!("🎯 PRIME DIRECTIVE: 100% autonomous gameplay - no user interaction required");
+    println!("🎯 DUAL MISSION: Mining operations + Shipyard exploration");
     
     match admiral.run_continuous_operations().await {
         Ok(()) => {
