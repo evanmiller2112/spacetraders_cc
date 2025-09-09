@@ -11,6 +11,7 @@ pub mod fleet_coordinator;
 pub mod ship_prioritizer;
 pub mod navigation;
 pub mod shipyard_operations;
+pub mod task_planner;
 
 pub use ship::*;
 pub use mining::*;
@@ -23,3 +24,4 @@ pub use fleet_coordinator::*;
 pub use ship_prioritizer::*;
 pub use navigation::*;
 pub use shipyard_operations::*;
+pub use task_planner::*;

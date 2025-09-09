@@ -94,9 +94,14 @@ impl ShipPrioritizer {
     fn analyze_ship_capabilities(&self, ship: &Ship) -> ShipCapabilities {
         // Probes/satellites are designed for exploration, not mining
         let is_probe = ship.registration.role == "SATELLITE" || ship.frame.symbol.contains("PROBE");
-        let can_mine = !is_probe && ship.mounts.iter().any(|mount| {
+        // Check for mining capability - either has mining mounts OR is a known mining role
+        let has_mining_mounts = ship.mounts.iter().any(|mount| {
             mount.symbol.contains("MINING") || mount.symbol.contains("EXTRACTOR")
         });
+        let is_mining_role = ship.registration.role.contains("EXCAVATOR") || 
+                           ship.registration.role.contains("MINER");
+        let can_mine = !is_probe && (has_mining_mounts || is_mining_role);
+        
         
         let mining_power = if is_probe {
             0 // Probes have no mining power regardless of mounts

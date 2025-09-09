@@ -64,7 +64,8 @@ impl NavigationPlanner {
         Ok(matching_waypoints)
     }
     
-    /// Check if a ship has enough fuel for a round trip to destination plus reserve for fuel source
+    /// Check if a ship has enough fuel for navigation to destination
+    /// Now supports both direct navigation and suggests intermediate fuel stops
     pub async fn can_navigate_safely(
         &self,
         ship: &Ship,
@@ -78,18 +79,28 @@ impl NavigationPlanner {
         let distance_to_dest = Self::calculate_distance(&ship.nav.route.destination, &destination);
         let fuel_needed_to_dest = Self::estimate_fuel_cost(distance_to_dest);
         
-        // WARNING: This still uses the old implementation because NavigationPlanner
-        // doesn't have access to FleetCoordinator's unified marketplace finder
-        // TODO: Refactor to use unified marketplace finding
+        // Account for orbit cost if currently docked
+        let available_fuel = if ship.nav.status == "DOCKED" {
+            ship.fuel.current - 1
+        } else {
+            ship.fuel.current
+        };
+        
+        // Check if direct navigation is possible
+        if available_fuel >= fuel_needed_to_dest {
+            return Ok(NavigationSafetyCheck {
+                is_safe: true,
+                fuel_needed: fuel_needed_to_dest,
+                current_fuel: ship.fuel.current,
+                reason: format!("Direct navigation possible: {} fuel available, {} needed", available_fuel, fuel_needed_to_dest),
+                nearest_fuel_source: None,
+            });
+        }
+        
+        // Direct navigation not possible - find nearest fuel station for multi-hop
         let marketplaces = self.find_nearest_waypoints_with_trait(
             system_symbol, 
-            &ShipRouteWaypoint {
-                symbol: destination.symbol.clone(),
-                waypoint_type: destination.waypoint_type.clone(),
-                system_symbol: destination.system_symbol.clone(),
-                x: destination.x,
-                y: destination.y,
-            },
+            &ship.nav.route.destination,
             "MARKETPLACE"
         ).await?;
         
@@ -98,29 +109,37 @@ impl NavigationPlanner {
                 is_safe: false,
                 fuel_needed: fuel_needed_to_dest,
                 current_fuel: ship.fuel.current,
-                reason: "No marketplace found in system for refueling".to_string(),
+                reason: "No fuel stations found in system for refueling".to_string(),
                 nearest_fuel_source: None,
             });
         }
         
-        // Calculate fuel needed to reach nearest marketplace from destination
+        // Find a fuel station we can reach with current fuel
+        for (marketplace, distance_to_fuel) in &marketplaces {
+            let fuel_needed_to_station = Self::estimate_fuel_cost(*distance_to_fuel);
+            
+            if available_fuel >= fuel_needed_to_station + 10 { // 10 fuel safety margin
+                return Ok(NavigationSafetyCheck {
+                    is_safe: false, // Not safe for direct navigation
+                    fuel_needed: fuel_needed_to_dest, // Still report the direct fuel needed
+                    current_fuel: ship.fuel.current,
+                    reason: format!("Multi-hop route needed: {} fuel available, {} needed for direct route. Can refuel at {}", 
+                                   available_fuel, fuel_needed_to_dest, marketplace.symbol),
+                    nearest_fuel_source: Some(marketplace.symbol.clone()),
+                });
+            }
+        }
+        
+        // No reachable fuel stations
         let (nearest_marketplace, distance_to_fuel) = &marketplaces[0];
-        let fuel_needed_to_marketplace = Self::estimate_fuel_cost(*distance_to_fuel);
-        
-        // Total fuel needed: to destination + to marketplace + safety buffer
-        let total_fuel_needed = fuel_needed_to_dest + fuel_needed_to_marketplace + 50; // 50 unit safety buffer
-        
-        let is_safe = ship.fuel.current >= total_fuel_needed;
+        let fuel_needed_to_station = Self::estimate_fuel_cost(*distance_to_fuel);
         
         Ok(NavigationSafetyCheck {
-            is_safe,
-            fuel_needed: total_fuel_needed,
+            is_safe: false,
+            fuel_needed: fuel_needed_to_dest,
             current_fuel: ship.fuel.current,
-            reason: if is_safe {
-                format!("Safe navigation: {} fuel available, {} needed", ship.fuel.current, total_fuel_needed)
-            } else {
-                format!("Insufficient fuel: {} available, {} needed", ship.fuel.current, total_fuel_needed)
-            },
+            reason: format!("No reachable fuel stations: {} fuel available, need {} to reach nearest station at {}", 
+                           available_fuel, fuel_needed_to_station, nearest_marketplace.symbol),
             nearest_fuel_source: Some(nearest_marketplace.symbol.clone()),
         })
     }

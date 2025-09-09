@@ -78,6 +78,7 @@ pub struct ShipState {
     pub ship: Ship,
     pub cooldown_until: Option<Instant>,
     pub current_action: Option<ShipAction>,
+    pub current_plan: Option<crate::operations::task_planner::TaskPlan>,
     pub status: ShipActorStatus,
 }
 
@@ -322,34 +323,10 @@ impl ShipActor {
         
         println!("⛏️ {} performing extraction at {}", self.ship_symbol, target);
         
-        match self.client.extract_resources(&self.ship_symbol).await {
-            Ok(extraction_data) => {
-                let yield_info = &extraction_data.extraction.extraction_yield;
-                println!("⛏️ {} extracted {} x{}", self.ship_symbol, yield_info.symbol, yield_info.units);
-                
-                // Set cooldown from extraction
-                if extraction_data.cooldown.remaining_seconds > 0.0 {
-                    self.cooldown_until = Some(Instant::now() + Duration::from_secs_f64(extraction_data.cooldown.remaining_seconds));
-                    
-                    // Persist cooldown
-                    if let Err(e) = self.cooldown_store.set_cooldown(&self.ship_symbol, extraction_data.cooldown.remaining_seconds) {
-                        println!("⚠️ Failed to save cooldown for {}: {}", self.ship_symbol, e);
-                    }
-                }
-                
-                // Check if it's contract material
-                if needed_materials.contains(&yield_info.symbol) {
-                    println!("🎯 {} found CONTRACT MATERIAL: {}! ✨", self.ship_symbol, yield_info.symbol);
-                }
-                
-                Ok(())
-            }
-            Err(e) => {
-                let error_msg = e.to_string();
-                println!("❌ {} extraction failed: {}", self.ship_symbol, error_msg);
-                Err(ShipActorError(error_msg))
-            }
-        }
+        // Wait for any in-transit status before attempting extraction
+        self.wait_for_arrival().await?;
+        
+        self.attempt_extraction_with_retry(needed_materials).await
     }
 
     async fn execute_exploration(&mut self, systems: &[String]) -> Result<(), ShipActorError> {
@@ -455,7 +432,7 @@ impl ShipActor {
 
     async fn execute_cargo_delivery(&mut self, contract_id: &str, destination: &str, trade_symbol: &str, units: i32) -> Result<(), ShipActorError> {
         // First check if ship is in transit and wait for arrival
-        let ship = self.client.get_ship(&self.ship_symbol).await
+        let mut ship = self.client.get_ship(&self.ship_symbol).await
             .map_err(|e| ShipActorError(format!("Failed to get ship status: {}", e)))?;
         
         if ship.nav.status == "IN_TRANSIT" {
@@ -477,10 +454,55 @@ impl ShipActor {
                         }
                     }
                 } else {
+                    ship = current_ship;
                     break;
                 }
             }
             println!("✅ {} arrived at destination", self.ship_symbol);
+        }
+        
+        // Check if ship is at the correct destination for delivery
+        if ship.nav.waypoint_symbol != destination {
+            println!("🧭 {} not at delivery destination ({} -> {}), navigating...", 
+                    self.ship_symbol, ship.nav.waypoint_symbol, destination);
+            
+            // Try to navigate to the destination
+            match self.execute_navigation(destination).await {
+                Ok(_) => {
+                    println!("✅ {} arrived at delivery destination: {}", self.ship_symbol, destination);
+                }
+                Err(nav_error) => {
+                    // Check if this is a fuel issue
+                    if nav_error.0.contains("Insufficient fuel") {
+                        println!("⛽ {} needs refuel before delivery navigation", self.ship_symbol);
+                        
+                        // Check fuel safety to get nearest fuel source suggestion
+                        let fuel_station = match self.navigation_planner.can_navigate_safely(&ship, destination).await {
+                            Ok(safety_check) => {
+                                safety_check.nearest_fuel_source
+                                    .ok_or_else(|| ShipActorError(format!("Insufficient fuel for delivery and no fuel station suggested")))?
+                            }
+                            Err(e) => {
+                                return Err(ShipActorError(format!("Failed to get fuel suggestions: {}", e)));
+                            }
+                        };
+                        
+                        println!("⛽ {} refueling at {} (suggested by navigation planner)", self.ship_symbol, fuel_station);
+                        self.execute_refuel_at_station(&fuel_station).await?;
+                        
+                        // Try navigation again after refueling
+                        println!("🧭 {} retrying navigation to {} after refuel", self.ship_symbol, destination);
+                        self.execute_navigation(destination).await?;
+                        
+                        println!("✅ {} arrived at delivery destination after refuel: {}", self.ship_symbol, destination);
+                    } else {
+                        // Re-throw non-fuel navigation errors
+                        return Err(nav_error);
+                    }
+                }
+            }
+        } else {
+            println!("📍 {} already at delivery destination: {}", self.ship_symbol, destination);
         }
         
         // Ensure ship is docked for cargo delivery
@@ -659,6 +681,7 @@ impl ShipActor {
             },
             cooldown_until: self.cooldown_until,
             current_action: None,
+            current_plan: None,
             status,
         };
         
@@ -774,8 +797,35 @@ impl ShipActor {
                 println!("🚢 {} docked at {}", self.ship_symbol, station);
             }
             Err(e) => {
-                // Already docked is okay
-                if !e.to_string().contains("already docked") {
+                let error_str = e.to_string();
+                // Handle various acceptable docking failures gracefully
+                if error_str.contains("already docked") {
+                    println!("🚢 {} already docked at {}", self.ship_symbol, station);
+                } else if error_str.contains("429 Too Many Requests") {
+                    // Extract retry delay from the rate limit error
+                    let retry_after = if let Some(retry_match) = error_str.find("\"retryAfter\":") {
+                        let start = retry_match + 13; // Length of "retryAfter":
+                        let end = error_str[start..].find(',').unwrap_or(10) + start;
+                        error_str[start..end].trim().parse::<f64>().unwrap_or(1.0)
+                    } else {
+                        1.0 // Default 1 second retry
+                    };
+                    println!("🕐 {} hit API rate limit - waiting {:.1}s before retry", self.ship_symbol, retry_after);
+                    return Err(ShipActorError(format!("Rate limited - retry in {:.1}s", retry_after)));
+                } else if error_str.contains("400 Bad Request") {
+                    // Common 400 errors for docking - handle gracefully
+                    if error_str.contains("not at waypoint") || error_str.contains("must be at") {
+                        println!("⚠️  {} cannot dock - not at correct location for {}", self.ship_symbol, station);
+                        return Err(ShipActorError(format!("Cannot refuel - ship not at station location: {}", station)));
+                    } else if error_str.contains("cannot dock") || error_str.contains("docking not allowed") {
+                        println!("⚠️  {} cannot dock at {} - docking not allowed", self.ship_symbol, station);
+                        return Err(ShipActorError(format!("Docking not allowed at station: {}", station)));
+                    } else {
+                        println!("⚠️  {} docking failed at {} with 400 error: {}", self.ship_symbol, station, error_str);
+                        return Err(ShipActorError(format!("Docking failed: {}", e)));
+                    }
+                } else {
+                    println!("⚠️  {} unexpected docking error at {}: {}", self.ship_symbol, station, error_str);
                     return Err(ShipActorError(format!("Docking failed: {}", e)));
                 }
             }
@@ -828,7 +878,35 @@ impl ShipActor {
                 println!("🚢 {} docked at {}", self.ship_symbol, marketplace);
             }
             Err(e) => {
-                if !e.to_string().contains("already docked") {
+                let error_str = e.to_string();
+                // Handle various acceptable docking failures gracefully
+                if error_str.contains("already docked") {
+                    println!("🚢 {} already docked at {}", self.ship_symbol, marketplace);
+                } else if error_str.contains("429 Too Many Requests") {
+                    // Extract retry delay from the rate limit error
+                    let retry_after = if let Some(retry_match) = error_str.find("\"retryAfter\":") {
+                        let start = retry_match + 13; // Length of "retryAfter":
+                        let end = error_str[start..].find(',').unwrap_or(10) + start;
+                        error_str[start..end].trim().parse::<f64>().unwrap_or(1.0)
+                    } else {
+                        1.0 // Default 1 second retry
+                    };
+                    println!("🕐 {} hit API rate limit - waiting {:.1}s before retry", self.ship_symbol, retry_after);
+                    return Err(ShipActorError(format!("Rate limited - retry in {:.1}s", retry_after)));
+                } else if error_str.contains("400 Bad Request") {
+                    // Common 400 errors for docking - handle gracefully
+                    if error_str.contains("not at waypoint") || error_str.contains("must be at") {
+                        println!("⚠️  {} cannot dock - not at correct location for {}", self.ship_symbol, marketplace);
+                        return Err(ShipActorError(format!("Cannot sell cargo - ship not at marketplace location: {}", marketplace)));
+                    } else if error_str.contains("cannot dock") || error_str.contains("docking not allowed") {
+                        println!("⚠️  {} cannot dock at {} - docking not allowed", self.ship_symbol, marketplace);
+                        return Err(ShipActorError(format!("Docking not allowed at marketplace: {}", marketplace)));
+                    } else {
+                        println!("⚠️  {} docking failed at {} with 400 error: {}", self.ship_symbol, marketplace, error_str);
+                        return Err(ShipActorError(format!("Docking failed: {}", e)));
+                    }
+                } else {
+                    println!("⚠️  {} unexpected docking error at {}: {}", self.ship_symbol, marketplace, error_str);
                     return Err(ShipActorError(format!("Docking failed: {}", e)));
                 }
             }
@@ -907,18 +985,154 @@ impl ShipActor {
         
         // Dock at marketplace
         match self.client.dock_ship(&self.ship_symbol).await {
-            Ok(_) => println!("🚢 {} docked at marketplace", self.ship_symbol),
-            Err(e) if !e.to_string().contains("already docked") => {
-                return Err(ShipActorError(format!("Docking failed: {}", e)));
+            Ok(_) => {
+                println!("🚢 {} docked at marketplace", self.ship_symbol);
             }
-            _ => {}
+            Err(e) => {
+                let error_str = e.to_string();
+                // Handle various acceptable docking failures gracefully
+                if error_str.contains("already docked") {
+                    println!("🚢 {} already docked at marketplace", self.ship_symbol);
+                } else if error_str.contains("429 Too Many Requests") {
+                    // Extract retry delay from the rate limit error
+                    let retry_after = if let Some(retry_match) = error_str.find("\"retryAfter\":") {
+                        let start = retry_match + 13; // Length of "retryAfter":
+                        let end = error_str[start..].find(',').unwrap_or(10) + start;
+                        error_str[start..end].trim().parse::<f64>().unwrap_or(1.0)
+                    } else {
+                        1.0 // Default 1 second retry
+                    };
+                    println!("🕐 {} hit API rate limit - waiting {:.1}s before retry", self.ship_symbol, retry_after);
+                    return Err(ShipActorError(format!("Rate limited - retry in {:.1}s", retry_after)));
+                } else if error_str.contains("400 Bad Request") {
+                    // Common 400 errors for docking - handle gracefully
+                    if error_str.contains("not at waypoint") || error_str.contains("must be at") {
+                        println!("⚠️  {} cannot dock - not at correct location for marketplace", self.ship_symbol);
+                        return Err(ShipActorError(format!("Cannot dock - ship not at marketplace location: {}", marketplace)));
+                    } else if error_str.contains("cannot dock") || error_str.contains("docking not allowed") {
+                        println!("⚠️  {} cannot dock at marketplace - docking not allowed", self.ship_symbol);
+                        return Err(ShipActorError(format!("Docking not allowed at marketplace: {}", marketplace)));
+                    } else {
+                        println!("⚠️  {} docking failed at marketplace with 400 error: {}", self.ship_symbol, error_str);
+                        return Err(ShipActorError(format!("Docking failed: {}", e)));
+                    }
+                } else {
+                    println!("⚠️  {} unexpected docking error at marketplace: {}", self.ship_symbol, error_str);
+                    return Err(ShipActorError(format!("Docking failed: {}", e)));
+                }
+            }
         }
         
         // Now sell all cargo
         self.execute_sell_cargo(marketplace).await
     }
     
-    /// Jettison non-contract cargo to make room
+    /// Check if an error message indicates the ship is in transit (error 4214)
+    fn is_transit_error(&self, error_msg: &str) -> bool {
+        error_msg.contains("4214") || 
+        error_msg.contains("in-transit") || 
+        error_msg.contains("arrives in") ||
+        error_msg.contains("secondsToArrival")
+    }
+    
+    /// Attempt resource extraction with automatic retry for transit errors
+    async fn attempt_extraction_with_retry(&mut self, needed_materials: &[String]) -> Result<(), ShipActorError> {
+        // Try extraction first
+        let extraction_result = self.try_extraction().await;
+        
+        match extraction_result {
+            Ok(extraction_data) => {
+                self.process_extraction_success(&extraction_data, needed_materials).await
+            }
+            Err(error_msg) => {
+                if self.is_transit_error(&error_msg) {
+                    // Handle transit error with retry
+                    println!("⏳ {} still in transit, waiting for arrival...", self.ship_symbol);
+                    self.wait_for_arrival().await?;
+                    
+                    // Retry after arrival
+                    match self.try_extraction().await {
+                        Ok(extraction_data) => {
+                            println!("⛏️ {} extraction successful after waiting for transit", self.ship_symbol);
+                            self.process_extraction_success(&extraction_data, needed_materials).await
+                        }
+                        Err(retry_error_msg) => {
+                            println!("❌ {} extraction failed even after waiting: {}", self.ship_symbol, retry_error_msg);
+                            Err(ShipActorError(retry_error_msg))
+                        }
+                    }
+                } else {
+                    println!("❌ {} extraction failed: {}", self.ship_symbol, error_msg);
+                    Err(ShipActorError(error_msg))
+                }
+            }
+        }
+    }
+    
+    /// Try extraction and return either success data or error message string
+    async fn try_extraction(&self) -> Result<crate::models::ExtractionData, String> {
+        match self.client.extract_resources(&self.ship_symbol).await {
+            Ok(extraction_data) => Ok(extraction_data),
+            Err(e) => Err(e.to_string())
+        }
+    }
+    
+    /// Process successful extraction data
+    async fn process_extraction_success(&mut self, extraction_data: &crate::models::ExtractionData, needed_materials: &[String]) -> Result<(), ShipActorError> {
+        let yield_info = &extraction_data.extraction.extraction_yield;
+        println!("⛏️ {} extracted {} x{}", self.ship_symbol, yield_info.symbol, yield_info.units);
+        
+        // Set cooldown from extraction
+        if extraction_data.cooldown.remaining_seconds > 0.0 {
+            self.cooldown_until = Some(Instant::now() + Duration::from_secs_f64(extraction_data.cooldown.remaining_seconds));
+            
+            // Persist cooldown
+            if let Err(e) = self.cooldown_store.set_cooldown(&self.ship_symbol, extraction_data.cooldown.remaining_seconds) {
+                println!("⚠️ Failed to save cooldown for {}: {}", self.ship_symbol, e);
+            }
+        }
+        
+        // Check if it's contract material
+        if needed_materials.contains(&yield_info.symbol) {
+            println!("🎯 {} found CONTRACT MATERIAL: {}! ✨", self.ship_symbol, yield_info.symbol);
+        }
+        
+        Ok(())
+    }
+
+    /// Wait for ship to arrive if it's currently in transit
+    async fn wait_for_arrival(&self) -> Result<(), ShipActorError> {
+        loop {
+            let ship = self.client.get_ship(&self.ship_symbol).await
+                .map_err(|e| ShipActorError(format!("Failed to check ship status: {}", e)))?;
+            
+            if ship.nav.status != "IN_TRANSIT" {
+                break; // Ship has arrived
+            }
+            
+            // Parse arrival time and calculate wait
+            if let Ok(arrival_time) = chrono::DateTime::parse_from_rfc3339(&ship.nav.route.arrival) {
+                let now = chrono::Utc::now();
+                let wait_seconds = (arrival_time.timestamp() - now.timestamp()).max(0);
+                if wait_seconds > 0 {
+                    println!("⏳ {} in transit to {}, arriving in {} seconds", 
+                            self.ship_symbol, ship.nav.route.destination.symbol, wait_seconds);
+                    
+                    // Wait for a reasonable amount (max 10 seconds at a time to avoid blocking)
+                    let sleep_duration = wait_seconds.min(10) as u64;
+                    tokio::time::sleep(Duration::from_secs(sleep_duration)).await;
+                    continue;
+                }
+            }
+            
+            // If we can't parse the time, wait a short amount and check again
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        
+        println!("✅ {} has arrived and is ready for operations", self.ship_symbol);
+        Ok(())
+    }
+
     async fn execute_jettison_cargo(&mut self, contract_materials: &[String]) -> Result<(), ShipActorError> {
         println!("🗑️ {} jettisoning non-contract cargo", self.ship_symbol);
         

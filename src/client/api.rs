@@ -3,6 +3,9 @@ use crate::models::*;
 use crate::API_BASE_URL;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+use tokio::sync::Mutex as TokioMutex;
 
 #[derive(Clone)]
 pub struct SpaceTradersClient {
@@ -10,6 +13,7 @@ pub struct SpaceTradersClient {
     pub token: String,
     debug_mode: bool,
     api_logging: bool,
+    last_request_time: std::sync::Arc<TokioMutex<Option<Instant>>>,
 }
 
 impl SpaceTradersClient {
@@ -31,6 +35,7 @@ impl SpaceTradersClient {
             token,
             debug_mode: false,
             api_logging: false,
+            last_request_time: std::sync::Arc::new(TokioMutex::new(None)),
         }
     }
     
@@ -40,6 +45,83 @@ impl SpaceTradersClient {
     
     pub fn set_api_logging(&mut self, logging: bool) {
         self.api_logging = logging;
+    }
+    
+    /// Enforce rate limiting: SpaceTraders allows 2 requests per second with burst of 30
+    async fn enforce_rate_limit(&self) {
+        const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(500); // 2 req/sec = 500ms between requests
+        
+        let mut last_time = self.last_request_time.lock().await;
+        if let Some(last) = *last_time {
+            let elapsed = last.elapsed();
+            if elapsed < MIN_REQUEST_INTERVAL {
+                let sleep_duration = MIN_REQUEST_INTERVAL - elapsed;
+                sleep(sleep_duration).await;
+            }
+        }
+        *last_time = Some(Instant::now());
+    }
+    
+    /// Handle 429 rate limit errors with exponential backoff
+    async fn handle_rate_limit_error(&self, retry_after: Option<f64>) {
+        let sleep_duration = if let Some(retry_after) = retry_after {
+            // Use the server-provided retry time
+            Duration::from_secs_f64(retry_after.max(0.1)) // Minimum 100ms
+        } else {
+            // Default backoff if no retry-after header
+            Duration::from_secs(1)
+        };
+        
+        println!("⚠️ Rate limit hit, waiting {:.1}s before retry", sleep_duration.as_secs_f64());
+        sleep(sleep_duration).await;
+    }
+    
+    /// Parse retry-after from 429 response
+    fn parse_retry_after(error_text: &str) -> Option<f64> {
+        // Try to extract retryAfter from the JSON error response
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(error_text) {
+            if let Some(retry_after) = json.get("error")?.get("data")?.get("retryAfter") {
+                return retry_after.as_f64();
+            }
+        }
+        None
+    }
+    
+    /// Wrapper for all HTTP requests with rate limiting and retry logic
+    async fn make_request_with_retry<T, F, Fut>(
+        &self, 
+        _method: &str, 
+        _url: &str, 
+        request_fn: F,
+        max_retries: u32
+    ) -> Result<T, String>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, String>>,
+    {
+        for attempt in 0..=max_retries {
+            // Enforce rate limiting before each request
+            self.enforce_rate_limit().await;
+            
+            match request_fn().await {
+                Ok(result) => return Ok(result),
+                Err(error_msg) => {
+                    // Check if it's a 429 rate limit error
+                    if error_msg.contains("429") && error_msg.contains("Too Many Requests") {
+                        if attempt < max_retries {
+                            let retry_after = Self::parse_retry_after(&error_msg);
+                            self.handle_rate_limit_error(retry_after).await;
+                            continue; // Retry
+                        }
+                    }
+                    
+                    // For non-rate-limit errors or final attempt, return the error
+                    return Err(error_msg);
+                }
+            }
+        }
+        
+        unreachable!("Loop should always return")
     }
     
     async fn request_approval(&self, method: &str, url: &str, body: Option<&str>) -> bool {
@@ -141,22 +223,34 @@ impl SpaceTradersClient {
             return error;
         }
         
-        let response = self.client.get(&url).send().await?;
-        let status = response.status().as_u16();
-        
-        if !response.status().is_success() {
-            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
-            self.log_api_call("GET", &url, None, status, Some(&error_body));
-            let error = Err(format!("API request failed with status: {}", status).into());
-            crate::debug_fn_exit!("SpaceTradersClient::get_agent", &error);
-            return error;
-        }
+        let result = self.make_request_with_retry("GET", &url, || async {
+            match self.client.get(&url).send().await {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    
+                    if !response.status().is_success() {
+                        let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+                        self.log_api_call("GET", &url, None, status, Some(&error_body));
+                        return Err(format!("Get agent failed with status {}: {}", status, error_body));
+                    }
 
-        let response_text = response.text().await?;
-        self.log_api_call("GET", &url, None, status, Some(&response_text));
+                    match response.text().await {
+                        Ok(response_text) => {
+                            self.log_api_call("GET", &url, None, status, Some(&response_text));
+                            
+                            match serde_json::from_str::<AgentResponse>(&response_text) {
+                                Ok(agent_response) => Ok(agent_response.data),
+                                Err(e) => Err(format!("JSON parse error: {}", e))
+                            }
+                        },
+                        Err(e) => Err(format!("Failed to read response: {}", e))
+                    }
+                },
+                Err(e) => Err(format!("Request failed: {}", e))
+            }
+        }, 3).await;
         
-        let agent_response: AgentResponse = serde_json::from_str(&response_text)?;
-        let result = Ok(agent_response.data);
+        let result = result.map_err(|e| e.into());
         crate::debug_fn_exit!("SpaceTradersClient::get_agent", &result);
         result
     }
@@ -265,54 +359,89 @@ impl SpaceTradersClient {
     // Ship operations
     pub async fn get_ships(&self) -> Result<Vec<Ship>, Box<dyn std::error::Error>> {
         let url = format!("{}/my/ships", API_BASE_URL);
-        let response = self.client.get(&url).send().await?;
-        
-        if !response.status().is_success() {
-            return Err(format!("API request failed with status: {}", response.status()).into());
-        }
+        let result = self.make_request_with_retry("GET", &url, || async {
+            match self.client.get(&url).send().await {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        return Err(format!("Get ships failed with status: {}", response.status()));
+                    }
 
-        let ships_response: ShipsResponse = response.json().await?;
-        Ok(ships_response.data)
+                    match response.json::<ShipsResponse>().await {
+                        Ok(ships_response) => Ok(ships_response.data),
+                        Err(e) => Err(format!("JSON parse error: {}", e))
+                    }
+                },
+                Err(e) => Err(format!("Request failed: {}", e))
+            }
+        }, 3).await;
+        result.map_err(|e| e.into())
     }
 
     pub async fn get_ship(&self, ship_symbol: &str) -> Result<Ship, Box<dyn std::error::Error>> {
         let url = format!("{}/my/ships/{}", API_BASE_URL, ship_symbol);
-        let response = self.client.get(&url).send().await?;
         
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response.text().await.unwrap_or_else(|_| "Could not read error response".to_string());
-            return Err(format!("Get ship failed with status {}: {}", status, error_body).into());
-        }
+        let result = self.make_request_with_retry("GET", &url, || async {
+            match self.client.get(&url).send().await {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let error_body = response.text().await.unwrap_or_else(|_| "Could not read error response".to_string());
+                        return Err(format!("Get ship failed with status {}: {}", status, error_body));
+                    }
 
-        let ship_response: ShipResponse = response.json().await?;
-        Ok(ship_response.data)
+                    match response.json::<ShipResponse>().await {
+                        Ok(ship_response) => Ok(ship_response.data),
+                        Err(e) => Err(format!("JSON parse error: {}", e))
+                    }
+                },
+                Err(e) => Err(format!("Request failed: {}", e))
+            }
+        }, 3).await;
+        result.map_err(|e| e.into())
     }
 
     pub async fn orbit_ship(&self, ship_symbol: &str) -> Result<ShipNav, Box<dyn std::error::Error>> {
         let url = format!("{}/my/ships/{}/orbit", API_BASE_URL, ship_symbol);
-        let response = self.client.post(&url).json(&serde_json::json!({})).send().await?;
-        
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response.text().await.unwrap_or_else(|_| "Could not read error response".to_string());
-            return Err(format!("Orbit failed with status {}: {}", status, error_body).into());
-        }
+        let result = self.make_request_with_retry("POST", &url, || async {
+            match self.client.post(&url).json(&serde_json::json!({})).send().await {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let error_body = response.text().await.unwrap_or_else(|_| "Could not read error response".to_string());
+                        return Err(format!("Orbit failed with status {}: {}", status, error_body));
+                    }
 
-        let orbit_response: OrbitResponse = response.json().await?;
-        Ok(orbit_response.data.nav)
+                    match response.json::<OrbitResponse>().await {
+                        Ok(orbit_response) => Ok(orbit_response.data.nav),
+                        Err(e) => Err(format!("JSON parse error: {}", e))
+                    }
+                },
+                Err(e) => Err(format!("Request failed: {}", e))
+            }
+        }, 3).await;
+        result.map_err(|e| e.into())
     }
 
     pub async fn dock_ship(&self, ship_symbol: &str) -> Result<ShipNav, Box<dyn std::error::Error>> {
         let url = format!("{}/my/ships/{}/dock", API_BASE_URL, ship_symbol);
-        let response = self.client.post(&url).json(&serde_json::json!({})).send().await?;
-        
-        if !response.status().is_success() {
-            return Err(format!("API request failed with status: {}", response.status()).into());
-        }
+        let result = self.make_request_with_retry("POST", &url, || async {
+            match self.client.post(&url).json(&serde_json::json!({})).send().await {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let error_body = response.text().await.unwrap_or_else(|_| "Could not read error response".to_string());
+                        return Err(format!("Dock failed with status {}: {}", status, error_body));
+                    }
 
-        let dock_response: DockResponse = response.json().await?;
-        Ok(dock_response.data.nav)
+                    match response.json::<DockResponse>().await {
+                        Ok(dock_response) => Ok(dock_response.data.nav),
+                        Err(e) => Err(format!("JSON parse error: {}", e))
+                    }
+                },
+                Err(e) => Err(format!("Request failed: {}", e))
+            }
+        }, 3).await;
+        result.map_err(|e| e.into())
     }
 
     pub async fn navigate_ship(&self, ship_symbol: &str, waypoint_symbol: &str) -> Result<NavigationData, Box<dyn std::error::Error>> {
@@ -325,16 +454,24 @@ impl SpaceTradersClient {
             return Err("API call not approved".into());
         }
         
-        let response = self.client.post(&url).json(&payload).send().await?;
-        
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response.text().await.unwrap_or_else(|_| "Could not read error response".to_string());
-            return Err(format!("Navigation failed with status {}: {}", status, error_body).into());
-        }
+        let result = self.make_request_with_retry("POST", &url, || async {
+            match self.client.post(&url).json(&payload).send().await {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let error_body = response.text().await.unwrap_or_else(|_| "Could not read error response".to_string());
+                        return Err(format!("Navigation failed with status {}: {}", status, error_body));
+                    }
 
-        let nav_response: NavigationResponse = response.json().await?;
-        Ok(nav_response.data)
+                    match response.json::<NavigationResponse>().await {
+                        Ok(nav_response) => Ok(nav_response.data),
+                        Err(e) => Err(format!("JSON parse error: {}", e))
+                    }
+                },
+                Err(e) => Err(format!("Request failed: {}", e))
+            }
+        }, 3).await;
+        result.map_err(|e| e.into())
     }
 
     // Mining operations
@@ -354,16 +491,24 @@ impl SpaceTradersClient {
 
     pub async fn extract_resources(&self, ship_symbol: &str) -> Result<ExtractionData, Box<dyn std::error::Error>> {
         let url = format!("{}/my/ships/{}/extract", API_BASE_URL, ship_symbol);
-        let response = self.client.post(&url).json(&serde_json::json!({})).send().await?;
-        
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response.text().await.unwrap_or_else(|_| "Could not read error response".to_string());
-            return Err(format!("Extraction failed with status {}: {}", status, error_body).into());
-        }
+        let result = self.make_request_with_retry("POST", &url, || async {
+            match self.client.post(&url).json(&serde_json::json!({})).send().await {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let error_body = response.text().await.unwrap_or_else(|_| "Could not read error response".to_string());
+                        return Err(format!("Extraction failed with status {}: {}", status, error_body));
+                    }
 
-        let extraction_response: ExtractionResponse = response.json().await?;
-        Ok(extraction_response.data)
+                    match response.json::<ExtractionResponse>().await {
+                        Ok(extraction_response) => Ok(extraction_response.data),
+                        Err(e) => Err(format!("JSON parse error: {}", e))
+                    }
+                },
+                Err(e) => Err(format!("Request failed: {}", e))
+            }
+        }, 3).await;
+        result.map_err(|e| e.into())
     }
 
     pub async fn extract_resources_with_survey(&self, ship_symbol: &str, survey: &Survey) -> Result<ExtractionData, Box<dyn std::error::Error>> {

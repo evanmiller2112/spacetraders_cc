@@ -3,9 +3,10 @@ use crate::client::SpaceTradersClient;
 use crate::models::*;
 use crate::operations::ship_actor::*;
 use crate::operations::ship_prioritizer::*;
+use crate::operations::task_planner::*;
 use crate::storage::{ShipStateStore, SurveyCache};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 use std::collections::HashMap;
 
 pub struct FleetCoordinator {
@@ -18,6 +19,7 @@ pub struct FleetCoordinator {
     fleet_metrics: Vec<ShipPerformanceMetrics>,
     ship_cache: ShipStateStore,
     survey_cache: SurveyCache,
+    task_planner: TaskPlanner,
 }
 
 impl FleetCoordinator {
@@ -26,6 +28,7 @@ impl FleetCoordinator {
         let prioritizer = ShipPrioritizer::new(client.clone());
         let ship_cache = ShipStateStore::new("storage/ship_states.json", 5); // 5 minute staleness threshold
         let survey_cache = SurveyCache::new("storage/survey_cache.json", 12); // 12 hour cache duration
+        let task_planner = TaskPlanner::new(client.clone());
         
         Self {
             client,
@@ -37,6 +40,7 @@ impl FleetCoordinator {
             fleet_metrics: Vec::new(),
             ship_cache,
             survey_cache,
+            task_planner,
         }
     }
 
@@ -89,6 +93,7 @@ impl FleetCoordinator {
             ship: ship.clone(),
             cooldown_until: None,
             current_action: None,
+            current_plan: None,
             status: ShipActorStatus::Idle,
         };
         
@@ -105,6 +110,140 @@ impl FleetCoordinator {
         Ok(())
     }
 
+    /// Print comprehensive fleet status at start/end of cycles
+    async fn print_fleet_status(&self, title: &str) -> Result<(), Box<dyn std::error::Error>> {
+        println!("\n═══════════════════════════════════════");
+        println!("🚢 {} FLEET STATUS", title);
+        println!("═══════════════════════════════════════");
+        
+        for (ship_symbol, state) in &self.ship_states {
+            let ship = &state.ship;
+            let cooldown_status = if let Some(cooldown_until) = state.cooldown_until {
+                let remaining = cooldown_until.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    "✅ Ready".to_string()
+                } else {
+                    format!("⏳ Cooldown: {}s", remaining.as_secs())
+                }
+            } else {
+                "✅ Ready".to_string()
+            };
+            
+            let action_status = if let Some(action) = &state.current_action {
+                format!("🎯 {}", match action {
+                    crate::operations::ship_actor::ShipAction::Mine { target, .. } => format!("Mining at {}", target),
+                    crate::operations::ship_actor::ShipAction::Navigate { destination } => format!("→ {}", destination),
+                    crate::operations::ship_actor::ShipAction::Refuel { station } => format!("Refueling at {}", station),
+                    crate::operations::ship_actor::ShipAction::SellCargo { marketplace } => format!("Selling at {}", marketplace),
+                    crate::operations::ship_actor::ShipAction::DeliverCargo { destination, .. } => format!("Delivering to {}", destination),
+                    _ => "Other task".to_string(),
+                })
+            } else {
+                match state.status {
+                    crate::operations::ship_actor::ShipActorStatus::Idle => "💤 Idle".to_string(),
+                    crate::operations::ship_actor::ShipActorStatus::Working => "🔄 Working".to_string(), 
+                    crate::operations::ship_actor::ShipActorStatus::OnCooldown => "⏳ On Cooldown".to_string(),
+                    crate::operations::ship_actor::ShipActorStatus::Navigating => "🧭 Navigating".to_string(),
+                    crate::operations::ship_actor::ShipActorStatus::Error(ref e) => format!("❌ Error: {}", e),
+                }
+            };
+            
+            println!("🚢 {} ({})", ship_symbol, ship.registration.role);
+            println!("   📍 Location: {}", ship.nav.waypoint_symbol);
+            println!("   📦 Cargo: {}/{} units", ship.cargo.units, ship.cargo.capacity);
+            println!("   ⛽ Fuel: {}/{} units", ship.fuel.current, ship.fuel.capacity);
+            println!("   {} | {}", action_status, cooldown_status);
+            
+            if ship.cargo.units > 0 {
+                let cargo_items: Vec<String> = ship.cargo.inventory.iter()
+                    .map(|item| format!("{} x{}", item.symbol, item.units))
+                    .collect();
+                println!("   📋 Inventory: {}", cargo_items.join(", "));
+            }
+            
+            if let Some(plan) = &state.current_plan {
+                println!("   📋 Plan: {} steps, {} fuel needed", plan.steps.len(), plan.estimated_fuel_required);
+            }
+            
+            println!();
+        }
+        
+        // Add contract status section
+        println!("📋 CONTRACT STATUS");
+        println!("═══════════════════════════════════════");
+        
+        match self.get_contract_status().await {
+            Ok(contracts) => {
+                if contracts.is_empty() {
+                    println!("   📋 No active contracts");
+                } else {
+                    for contract in contracts {
+                        let status_icon = if contract.fulfilled {
+                            "✅"
+                        } else if contract.accepted {
+                            "🔄"
+                        } else {
+                            "📝"
+                        };
+                        
+                        let status_text = if contract.fulfilled {
+                            "COMPLETED"
+                        } else if contract.accepted {
+                            "ACTIVE"
+                        } else {
+                            "AVAILABLE"
+                        };
+                        
+                        println!("   {} {} [{}]", status_icon, contract.id, status_text);
+                        
+                        if contract.accepted && !contract.fulfilled {
+                            // Show delivery progress
+                            for delivery in &contract.terms.deliver {
+                                let progress = (delivery.units_fulfilled as f64 / delivery.units_required as f64) * 100.0;
+                                let progress_bar = self.create_progress_bar(progress, 20);
+                                
+                                println!("      📦 {}: {}/{} units ({:.1}%) {}", 
+                                        delivery.trade_symbol,
+                                        delivery.units_fulfilled,
+                                        delivery.units_required,
+                                        progress,
+                                        progress_bar);
+                                println!("      📍 Deliver to: {}", delivery.destination_symbol);
+                            }
+                            
+                            // Show payment info
+                            println!("      💰 Payment: {} credits (+ {} on completion)", 
+                                    contract.terms.payment.on_accepted,
+                                    contract.terms.payment.on_fulfilled);
+                                    
+                            // Show deadline
+                            if let Ok(deadline) = chrono::DateTime::parse_from_rfc3339(&contract.terms.deadline) {
+                                let now = chrono::Utc::now();
+                                let time_left = deadline.timestamp() - now.timestamp();
+                                
+                                if time_left > 0 {
+                                    let days = time_left / 86400;
+                                    let hours = (time_left % 86400) / 3600;
+                                    println!("      ⏰ Deadline: {}d {}h remaining", days, hours);
+                                } else {
+                                    println!("      ⚠️ Deadline: EXPIRED");
+                                }
+                            }
+                        }
+                        
+                        println!();
+                    }
+                }
+            }
+            Err(e) => {
+                println!("   ⚠️ Failed to fetch contract status: {}", e);
+            }
+        }
+        
+        println!("═══════════════════════════════════════\n");
+        Ok(())
+    }
+
     pub async fn run_autonomous_operations(&mut self, contract: &Contract) -> Result<(), Box<dyn std::error::Error>> {
         println!("🎖️ Fleet Coordinator starting autonomous operations...");
         println!("🎯 Contract: {} - Materials: {:?}", contract.id, 
@@ -117,6 +256,9 @@ impl FleetCoordinator {
             cycle_count += 1;
             println!("\n🔄 ═══ COORDINATION CYCLE #{} ═══", cycle_count);
             
+            // Print fleet status at start of cycle
+            self.print_fleet_status("START OF CYCLE").await?;
+            
             // Process status updates from ships
             self.process_status_updates().await;
             
@@ -128,6 +270,9 @@ impl FleetCoordinator {
             
             // Assign tasks based on current fleet state
             self.assign_tasks(contract).await?;
+            
+            // Print fleet status at end of cycle
+            self.print_fleet_status("END OF CYCLE").await?;
             
             // Wait before next cycle
             sleep(Duration::from_secs(10)).await;
@@ -228,9 +373,15 @@ impl FleetCoordinator {
                         } else if self.is_cargo_full(&ship) {
                             println!("🗃️ {} cargo full - need to manage inventory", ship_symbol);
                             self.assign_cargo_management(&ship, contract).await?;
-                        } else if metrics.capabilities.can_mine && metrics.contract_contribution >= 0.05 {
-                            println!("⛏️ {} assigned to mining (priority: {:.2})", ship_symbol, metrics.priority_weight);
-                            self.assign_mining_task(&ship, &needed_materials, &contract.id).await?;
+                        } else if metrics.capabilities.can_mine && (metrics.contract_contribution >= 0.01 || ship.registration.role.contains("MINER") || ship.registration.role.contains("EXCAVATOR")) {
+                            // Check if ship needs fuel before mining (more proactive than general refuel check)
+                            if self.should_refuel_before_mining(&ship) {
+                                println!("⛽ {} needs fuel before mining ({}/{})", ship_symbol, ship.fuel.current, ship.fuel.capacity);
+                                self.assign_refuel_task(&ship).await?;
+                            } else {
+                                println!("⛏️ {} assigned to mining (priority: {:.2})", ship_symbol, metrics.priority_weight);
+                                self.assign_mining_task(&ship, &needed_materials, &contract.id).await?;
+                            }
                         } else if metrics.capabilities.can_trade {
                             println!("🏪 {} assigned to support operations (trading ready)", ship_symbol);
                         }
@@ -507,15 +658,7 @@ impl FleetCoordinator {
                     println!("📦 Assigning {} to deliver {} x{} to {}", 
                             ship.symbol, delivery.trade_symbol, units_to_deliver, delivery.destination_symbol);
                     
-                    // First navigate to destination if not there
-                    if ship.nav.waypoint_symbol != delivery.destination_symbol {
-                        let nav_action = ShipAction::Navigate {
-                            destination: delivery.destination_symbol.clone(),
-                        };
-                        self.send_action_to_ship(&ship.symbol, nav_action).await?;
-                    }
-                    
-                    // Then deliver cargo
+                    // Send delivery action - it will handle navigation automatically
                     let delivery_action = ShipAction::DeliverCargo {
                         contract_id: contract.id.clone(),
                         destination: delivery.destination_symbol.clone(),
@@ -533,6 +676,30 @@ impl FleetCoordinator {
     }
 
     async fn send_action_to_ship(&mut self, ship_symbol: &str, action: ShipAction) -> Result<(), Box<dyn std::error::Error>> {
+        // Create a task plan for the action
+        if let Some(ship_state) = self.ship_states.get(ship_symbol) {
+            match self.task_planner.create_plan(&action, &ship_state.ship).await {
+                Ok(plan) => {
+                    println!("📋 {} task plan: {} steps, {} fuel needed", 
+                            ship_symbol, plan.steps.len(), plan.estimated_fuel_required);
+                    
+                    // Update ship state with the plan
+                    if let Some(state) = self.ship_states.get_mut(ship_symbol) {
+                        state.current_action = Some(action.clone());
+                        state.current_plan = Some(plan);
+                    }
+                },
+                Err(e) => {
+                    println!("⚠️ Failed to create task plan for {}: {}", ship_symbol, e);
+                    // Continue without a plan
+                    if let Some(state) = self.ship_states.get_mut(ship_symbol) {
+                        state.current_action = Some(action.clone());
+                        state.current_plan = None;
+                    }
+                }
+            }
+        }
+        
         if let Some(sender) = self.ship_queues.get(ship_symbol) {
             // Mark ship state as stale since we're sending it an action
             let action_description = format!("{:?}", action);
@@ -559,7 +726,7 @@ impl FleetCoordinator {
         Ok(false)
     }
 
-    pub fn print_fleet_status(&self) {
+    pub fn print_fleet_summary(&self) {
         println!("\n📊 FLEET STATUS:");
         self.ship_cache.print_cache_status();
         
@@ -588,6 +755,24 @@ impl FleetCoordinator {
         }
     }
 
+    /// Get contract status with smart caching - use cached data if fresh, otherwise fetch from API
+    async fn get_contract_status(&self) -> Result<Vec<Contract>, Box<dyn std::error::Error>> {
+        // For now, always fetch fresh contract data as contracts change frequently during operations
+        // TODO: Implement contract caching with shorter refresh intervals (e.g., 30 seconds)
+        self.client.get_contracts().await
+    }
+
+    /// Create a visual progress bar for contract completion
+    fn create_progress_bar(&self, percentage: f64, width: usize) -> String {
+        let filled = ((percentage / 100.0) * width as f64) as usize;
+        let empty = width - filled;
+        
+        let filled_chars = "█".repeat(filled);
+        let empty_chars = "░".repeat(empty);
+        
+        format!("[{}{}]", filled_chars, empty_chars)
+    }
+
     // Cargo and fuel management helper methods
     fn needs_refuel(&self, ship: &Ship) -> bool {
         // Probes don't need fuel management - they're designed for long-range exploration
@@ -595,9 +780,36 @@ impl FleetCoordinator {
             return false;
         }
         
-        // Need refuel if less than 20% fuel or less than 400 units
+        // Check if ship has a current task plan with fuel requirements
+        if let Some(ship_state) = self.ship_states.get(&ship.symbol) {
+            if let Some(plan) = &ship_state.current_plan {
+                // Need refuel if insufficient fuel for current task (with 20% safety buffer)
+                let fuel_needed_with_buffer = (plan.estimated_fuel_required as f64 * 1.2) as i32;
+                if ship.fuel.current < fuel_needed_with_buffer {
+                    return true;
+                }
+            }
+        }
+        
+        // Default: Need refuel if less than 20% fuel
         let fuel_percentage = ship.fuel.current as f64 / ship.fuel.capacity as f64;
-        fuel_percentage < 0.2 || ship.fuel.current < 400
+        fuel_percentage < 0.2
+    }
+    
+    /// More proactive fuel check specifically for mining operations
+    /// Mining ships travel between asteroids and marketplaces frequently, so we want them well-fueled
+    fn should_refuel_before_mining(&self, ship: &Ship) -> bool {
+        // Probes don't need fuel management - they're designed for long-range exploration
+        if self.is_probe(ship) {
+            return false;
+        }
+        
+        // Refuel if less than 50% fuel before mining - this ensures ships can:
+        // 1. Travel to mining asteroids
+        // 2. Travel back to marketplaces to sell cargo  
+        // 3. Handle multiple mining cycles without constantly running low
+        let fuel_percentage = ship.fuel.current as f64 / ship.fuel.capacity as f64;
+        fuel_percentage < 0.5
     }
 
     fn is_cargo_full(&self, ship: &Ship) -> bool {
@@ -710,34 +922,6 @@ impl FleetCoordinator {
         }
     }
 
-    async fn assign_sell_task(&mut self, ship: &Ship) -> Result<(), Box<dyn std::error::Error>> {
-        // Find nearest marketplace to sell cargo
-        let marketplace = self.find_nearest_marketplace(ship).await?;
-        println!("💰 {} assigned to sell cargo at {} (nearest marketplace)", ship.symbol, marketplace);
-
-        // Create sell action for non-contract items
-        let action = ShipAction::SellCargo {
-            marketplace,
-        };
-        
-        self.send_action_to_ship(&ship.symbol, action).await
-    }
-
-    async fn find_nearest_marketplace(&mut self, ship: &Ship) -> Result<String, Box<dyn std::error::Error>> {
-        // Use the unified marketplace finder
-        let system_symbol = &ship.nav.system_symbol;
-        let ship_x = ship.nav.route.destination.x;
-        let ship_y = ship.nav.route.destination.y;
-        
-        match self.find_marketplace(system_symbol, ship_x, ship_y, &ship.symbol).await? {
-            Some(marketplace) => Ok(marketplace),
-            None => {
-                // Fallback to headquarters if no marketplaces found
-                println!("⚠️ No marketplaces found in {}, using headquarters", system_symbol);
-                Ok("X1-DC46-A1".to_string())
-            }
-        }
-    }
 
     // Helper method to get system waypoints - checks cache first
     async fn get_system_waypoints_cached(&mut self, system_symbol: &str) -> Result<&Vec<Waypoint>, Box<dyn std::error::Error>> {
