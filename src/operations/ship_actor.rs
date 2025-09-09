@@ -747,48 +747,74 @@ impl ShipActor {
             .map_err(|e| ShipActorError(format!("Failed to get ship status: {}", e)))?;
         
         if current_ship.nav.waypoint_symbol != station {
-            println!("🚀 {} navigating to {} for refuel", self.ship_symbol, station);
-            
-            // Ensure ship is in orbit before navigating
-            if current_ship.nav.status == "DOCKED" {
-                println!("🛸 {} needs to orbit before navigating", self.ship_symbol);
-                match self.client.orbit_ship(&self.ship_symbol).await {
-                    Ok(_) => {
-                        println!("🌌 {} now in orbit, ready to navigate", self.ship_symbol);
-                    }
-                    Err(e) => {
-                        if !e.to_string().contains("already in orbit") {
-                            return Err(ShipActorError(format!("Failed to orbit before navigation: {}", e)));
-                        }
-                    }
-                }
-            }
-            
-            // Navigate to station  
-            self.client.navigate_ship(&self.ship_symbol, station).await
-                .map_err(|e| ShipActorError(format!("Navigation to {} failed: {}", station, e)))?;
-            
-            println!("✅ {} navigation started to {}", self.ship_symbol, station);
-            
-            // Wait for transit to complete
-            loop {
-                let transit_ship = self.client.get_ship(&self.ship_symbol).await
-                    .map_err(|e| ShipActorError(format!("Failed to check ship status: {}", e)))?;
+            // Check if ship is already in transit
+            if current_ship.nav.status == "IN_TRANSIT" {
+                println!("⏳ {} already in transit to {}, waiting for arrival before refuel", 
+                        self.ship_symbol, current_ship.nav.route.destination.symbol);
+                        
+                // Wait for current transit to complete first
+                self.wait_for_transit_completion().await?;
                 
-                if transit_ship.nav.status == "IN_TRANSIT" {
-                    if let Ok(arrival_time) = chrono::DateTime::parse_from_rfc3339(&transit_ship.nav.route.arrival) {
-                        let now = chrono::Utc::now();
-                        let wait_seconds = (arrival_time.timestamp() - now.timestamp()).max(0);
-                        if wait_seconds > 0 {
-                            println!("⏳ {} in transit, arriving in {} seconds", self.ship_symbol, wait_seconds);
-                            tokio::time::sleep(Duration::from_secs(wait_seconds.min(5) as u64)).await;
-                            continue;
+                // Get updated ship status after arrival
+                let arrived_ship = self.client.get_ship(&self.ship_symbol).await
+                    .map_err(|e| ShipActorError(format!("Failed to get ship status after arrival: {}", e)))?;
+                
+                // Check if we arrived at the refuel station by chance
+                if arrived_ship.nav.waypoint_symbol == station {
+                    println!("🎯 {} arrived at refuel station {} during transit", self.ship_symbol, station);
+                } else {
+                    println!("🚀 {} now navigating to {} for refuel", self.ship_symbol, station);
+                    
+                    // Orbit if needed and navigate to refuel station
+                    if arrived_ship.nav.status == "DOCKED" {
+                        self.client.orbit_ship(&self.ship_symbol).await
+                            .map_err(|e| {
+                                if !e.to_string().contains("already in orbit") {
+                                    ShipActorError(format!("Failed to orbit before refuel navigation: {}", e))
+                                } else {
+                                    ShipActorError("".to_string()) // Will be ignored
+                                }
+                            }).ok(); // Ignore orbit errors
+                    }
+                    
+                    // Navigate to refuel station
+                    self.client.navigate_ship(&self.ship_symbol, station).await
+                        .map_err(|e| ShipActorError(format!("Navigation to {} failed: {}", station, e)))?;
+                    
+                    println!("✅ {} navigation started to {}", self.ship_symbol, station);
+                    
+                    // Wait for this new transit to complete
+                    self.wait_for_transit_completion().await?;
+                }
+            } else {
+                println!("🚀 {} navigating to {} for refuel", self.ship_symbol, station);
+                
+                // Ensure ship is in orbit before navigating
+                if current_ship.nav.status == "DOCKED" {
+                    println!("🛸 {} needs to orbit before navigating", self.ship_symbol);
+                    match self.client.orbit_ship(&self.ship_symbol).await {
+                        Ok(_) => {
+                            println!("🌌 {} now in orbit, ready to navigate", self.ship_symbol);
+                        }
+                        Err(e) => {
+                            if !e.to_string().contains("already in orbit") {
+                                return Err(ShipActorError(format!("Failed to orbit before navigation: {}", e)));
+                            }
                         }
                     }
                 }
-                break;
+                
+                // Navigate to station  
+                self.client.navigate_ship(&self.ship_symbol, station).await
+                    .map_err(|e| ShipActorError(format!("Navigation to {} failed: {}", station, e)))?;
+                
+                println!("✅ {} navigation started to {}", self.ship_symbol, station);
+                
+                // Wait for transit to complete
+                self.wait_for_transit_completion().await?;
             }
-            println!("✅ {} arrived at {}", self.ship_symbol, station);
+        } else {
+            println!("📍 {} already at refuel station: {}", self.ship_symbol, station);
         }
         
         // Dock at station
@@ -1169,6 +1195,30 @@ impl ShipActor {
             println!("⚠️ {} no items jettisoned", self.ship_symbol);
         }
         
+        Ok(())
+    }
+
+    /// Helper function to wait for ship transit to complete
+    async fn wait_for_transit_completion(&self) -> Result<(), ShipActorError> {
+        loop {
+            let transit_ship = self.client.get_ship(&self.ship_symbol).await
+                .map_err(|e| ShipActorError(format!("Failed to check ship status during transit: {}", e)))?;
+            
+            if transit_ship.nav.status == "IN_TRANSIT" {
+                if let Ok(arrival_time) = chrono::DateTime::parse_from_rfc3339(&transit_ship.nav.route.arrival) {
+                    let now = chrono::Utc::now();
+                    let wait_seconds = (arrival_time.timestamp() - now.timestamp()).max(0);
+                    if wait_seconds > 0 {
+                        println!("⏳ {} in transit, arriving in {} seconds", self.ship_symbol, wait_seconds);
+                        tokio::time::sleep(Duration::from_secs(wait_seconds.min(5) as u64)).await;
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+        
+        println!("✅ {} transit completed", self.ship_symbol);
         Ok(())
     }
 }
