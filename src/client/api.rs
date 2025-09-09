@@ -190,6 +190,18 @@ impl SpaceTradersClient {
         Ok(waypoints_response.data)
     }
 
+    pub async fn get_system_waypoints_with_traits(&self, system_symbol: &str, traits: &str) -> Result<Vec<Waypoint>, Box<dyn std::error::Error>> {
+        let url = format!("{}/systems/{}/waypoints?traits={}", API_BASE_URL, system_symbol, traits);
+        let response = self.client.get(&url).send().await?;
+        
+        if !response.status().is_success() {
+            return Err(format!("API request failed with status: {}", response.status()).into());
+        }
+
+        let waypoints_response: WaypointsResponse = response.json().await?;
+        Ok(waypoints_response.data)
+    }
+
     // Contract operations
     pub async fn get_contracts(&self) -> Result<Vec<Contract>, Box<dyn std::error::Error>> {
         let url = format!("{}/my/contracts", API_BASE_URL);
@@ -442,6 +454,33 @@ impl SpaceTradersClient {
 
         let purchase_response: ShipPurchaseResponse = response.json().await?;
         Ok(purchase_response.data)
+    }
+
+    pub async fn jettison_cargo(&self, ship_symbol: &str, item_symbol: &str, units: i32) -> Result<JettisonCargoData, Box<dyn std::error::Error>> {
+        let url = format!("{}/my/ships/{}/jettison", API_BASE_URL, ship_symbol);
+        let payload = serde_json::json!({
+            "symbol": item_symbol,
+            "units": units
+        });
+        
+        if !self.request_approval("POST", &url, Some(&payload.to_string())).await {
+            return Err("API call not approved".into());
+        }
+        
+        let response = self.client.post(&url).json(&payload).send().await?;
+        
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(format!("Jettison failed: {}", error_text).into());
+        }
+
+        let response_text = response.text().await?;
+        if self.debug_mode {
+            println!("🔍 Jettison API response: {}", response_text);
+        }
+        
+        let jettison_response: JettisonCargoResponse = serde_json::from_str(&response_text)?;
+        Ok(jettison_response.data)
     }
 
     // Systems operations

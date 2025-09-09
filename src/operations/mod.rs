@@ -10,6 +10,7 @@ pub mod ship_actor;
 pub mod fleet_coordinator;
 pub mod ship_prioritizer;
 pub mod navigation;
+pub mod shipyard_operations;
 
 pub use ship::*;
 pub use mining::*;
@@ -21,3 +22,4 @@ pub use ship_actor::*;
 pub use fleet_coordinator::*;
 pub use ship_prioritizer::*;
 pub use navigation::*;
+pub use shipyard_operations::*;

@@ -89,3 +89,9 @@ pub struct RefuelTransaction {
     pub units: Option<i32>,
     pub timestamp: String,
 }
+
+// Jettison structures
+#[derive(Debug, Deserialize)]
+pub struct JettisonCargoData {
+    pub cargo: crate::models::ShipCargo,
+}

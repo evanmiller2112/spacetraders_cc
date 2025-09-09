@@ -189,3 +189,8 @@ pub struct JumpGateResponse {
 pub struct JumpResponse {
     pub data: crate::models::navigation::JumpData,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct JettisonCargoResponse {
+    pub data: crate::models::transaction::JettisonCargoData,
+}

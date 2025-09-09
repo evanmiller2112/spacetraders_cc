@@ -64,6 +64,13 @@ pub enum ShipAction {
         trade_symbol: String,
         units: i32,
     },
+    SmartSellOrJettison {
+        marketplace: String,
+        contract_materials: Vec<String>,
+    },
+    JettisonCargo {
+        contract_materials: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +218,12 @@ impl ShipActor {
             }
             ShipAction::DeliverCargo { contract_id, destination, trade_symbol, units } => {
                 self.execute_cargo_delivery(contract_id, destination, trade_symbol, *units).await
+            }
+            ShipAction::SmartSellOrJettison { marketplace, contract_materials } => {
+                self.execute_smart_sell_or_jettison(marketplace, contract_materials).await
+            }
+            ShipAction::JettisonCargo { contract_materials } => {
+                self.execute_jettison_cargo(contract_materials).await
             }
         };
 
@@ -841,6 +854,107 @@ impl ShipActor {
         }
         
         println!("💰 {} finished selling cargo", self.ship_symbol);
+        Ok(())
+    }
+    
+    /// Smart sell or jettison: try to sell first, then jettison if selling fails
+    async fn execute_smart_sell_or_jettison(&mut self, marketplace: &str, contract_materials: &[String]) -> Result<(), ShipActorError> {
+        println!("🏪 {} attempting smart sell/jettison at {}", self.ship_symbol, marketplace);
+        
+        // First, try to sell at the marketplace
+        let sell_result = self.execute_sell_cargo_at_marketplace(marketplace).await;
+        
+        match sell_result {
+            Ok(()) => {
+                println!("✅ {} successfully sold cargo at marketplace", self.ship_symbol);
+                Ok(())
+            }
+            Err(e) => {
+                println!("⚠️ {} selling failed: {}", self.ship_symbol, e);
+                println!("🗑️ {} falling back to jettisoning non-contract cargo", self.ship_symbol);
+                
+                // Fallback to jettisoning
+                self.execute_jettison_cargo(contract_materials).await
+            }
+        }
+    }
+    
+    /// Execute selling cargo at a specific marketplace
+    async fn execute_sell_cargo_at_marketplace(&mut self, marketplace: &str) -> Result<(), ShipActorError> {
+        // Navigate to marketplace first
+        let current_ship = self.client.get_ship(&self.ship_symbol).await
+            .map_err(|e| ShipActorError(format!("Failed to get ship status: {}", e)))?;
+        
+        if current_ship.nav.waypoint_symbol != marketplace {
+            println!("🚀 {} navigating to marketplace {}", self.ship_symbol, marketplace);
+            
+            // Ensure ship is in orbit before navigating
+            if current_ship.nav.status == "DOCKED" {
+                match self.client.orbit_ship(&self.ship_symbol).await {
+                    Ok(_) => println!("🌌 {} in orbit for navigation", self.ship_symbol),
+                    Err(e) if !e.to_string().contains("already in orbit") => {
+                        return Err(ShipActorError(format!("Failed to orbit: {}", e)));
+                    }
+                    _ => {}
+                }
+            }
+            
+            self.client.navigate_ship(&self.ship_symbol, marketplace).await
+                .map_err(|e| ShipActorError(format!("Navigation to {} failed: {}", marketplace, e)))?;
+                
+            println!("✅ {} arrived at marketplace {}", self.ship_symbol, marketplace);
+        }
+        
+        // Dock at marketplace
+        match self.client.dock_ship(&self.ship_symbol).await {
+            Ok(_) => println!("🚢 {} docked at marketplace", self.ship_symbol),
+            Err(e) if !e.to_string().contains("already docked") => {
+                return Err(ShipActorError(format!("Docking failed: {}", e)));
+            }
+            _ => {}
+        }
+        
+        // Now sell all cargo
+        self.execute_sell_cargo(marketplace).await
+    }
+    
+    /// Jettison non-contract cargo to make room
+    async fn execute_jettison_cargo(&mut self, contract_materials: &[String]) -> Result<(), ShipActorError> {
+        println!("🗑️ {} jettisoning non-contract cargo", self.ship_symbol);
+        
+        // Get current cargo
+        let ship = self.client.get_ship(&self.ship_symbol).await
+            .map_err(|e| ShipActorError(format!("Failed to get ship status: {}", e)))?;
+        
+        let mut jettisoned_items = 0;
+        let mut kept_items = 0;
+        
+        for item in &ship.cargo.inventory {
+            if contract_materials.contains(&item.symbol) {
+                println!("   🎯 Keeping contract item: {} x{}", item.symbol, item.units);
+                kept_items += 1;
+            } else {
+                println!("   🗑️ Jettisoning: {} x{}", item.symbol, item.units);
+                
+                match self.client.jettison_cargo(&self.ship_symbol, &item.symbol, item.units).await {
+                    Ok(_jettison_data) => {
+                        println!("   ✅ Jettisoned {} x{}", item.symbol, item.units);
+                        jettisoned_items += 1;
+                    }
+                    Err(e) => {
+                        println!("   ⚠️ Failed to jettison {}: {}", item.symbol, e);
+                    }
+                }
+            }
+        }
+        
+        if jettisoned_items > 0 {
+            println!("🗑️ {} jettisoned {} items, kept {} contract items", 
+                    self.ship_symbol, jettisoned_items, kept_items);
+        } else {
+            println!("⚠️ {} no items jettisoned", self.ship_symbol);
+        }
+        
         Ok(())
     }
 }

@@ -120,6 +120,12 @@ impl FleetCoordinator {
             // Process status updates from ships
             self.process_status_updates().await;
             
+            // Check for new ships that might have been added
+            self.discover_new_ships().await?;
+            
+            // Check if we should purchase additional ships
+            self.check_ship_expansion(contract).await?;
+            
             // Assign tasks based on current fleet state
             self.assign_tasks(contract).await?;
             
@@ -216,8 +222,8 @@ impl FleetCoordinator {
                         } else if self.needs_refuel(&ship) {
                             println!("⛽ {} needs fuel ({}/{})", ship_symbol, ship.fuel.current, ship.fuel.capacity);
                             self.assign_refuel_task(&ship).await?;
-                        } else if self.has_contract_materials(&ship, &needed_materials) {
-                            println!("📦 {} has contract materials - assigning delivery", ship_symbol);
+                        } else if self.should_deliver_cargo(&ship, contract) {
+                            println!("📦 {} ready for delivery - assigning cargo delivery", ship_symbol);
                             self.assign_delivery_task(&ship, contract).await?;
                         } else if self.is_cargo_full(&ship) {
                             println!("🗃️ {} cargo full - need to manage inventory", ship_symbol);
@@ -248,6 +254,57 @@ impl FleetCoordinator {
 
     fn has_contract_materials(&self, ship: &Ship, needed_materials: &[String]) -> bool {
         ship.cargo.inventory.iter().any(|item| needed_materials.contains(&item.symbol))
+    }
+    
+    /// Determine if ship should deliver cargo (either full cargo or enough for contract)
+    fn should_deliver_cargo(&self, ship: &Ship, contract: &Contract) -> bool {
+        let needed_materials: Vec<String> = contract.terms.deliver
+            .iter()
+            .map(|d| d.trade_symbol.clone())
+            .collect();
+        
+        // Check if ship has any contract materials
+        let has_contract_items = self.has_contract_materials(ship, &needed_materials);
+        if !has_contract_items {
+            return false;
+        }
+        
+        // Calculate how much contract material we have
+        let mut contract_material_count = 0;
+        let mut total_contract_required = 0;
+        
+        for delivery in &contract.terms.deliver {
+            let remaining_needed = delivery.units_required - delivery.units_fulfilled;
+            total_contract_required += remaining_needed;
+            
+            if let Some(cargo_item) = ship.cargo.inventory.iter().find(|item| item.symbol == delivery.trade_symbol) {
+                contract_material_count += cargo_item.units.min(remaining_needed);
+            }
+        }
+        
+        // Deliver if:
+        // 1. Cargo is full (>= 90% capacity)
+        // 2. We have enough to fulfill entire contract
+        // 3. We have a significant amount (>= 75% of cargo) of contract materials
+        let cargo_full = ship.cargo.units as f64 / ship.cargo.capacity as f64 >= 0.9;
+        let can_fulfill_contract = contract_material_count >= total_contract_required;
+        let significant_amount = contract_material_count as f64 / ship.cargo.capacity as f64 >= 0.75;
+        
+        if cargo_full {
+            println!("🗃️ {} cargo nearly full ({}/{}), should deliver", ship.symbol, ship.cargo.units, ship.cargo.capacity);
+            true
+        } else if can_fulfill_contract {
+            println!("🎯 {} has enough to fulfill contract ({} units), should deliver", ship.symbol, contract_material_count);
+            true
+        } else if significant_amount {
+            println!("📦 {} has significant contract materials ({} units = {:.1}%), should deliver", 
+                    ship.symbol, contract_material_count, (contract_material_count as f64 / ship.cargo.capacity as f64) * 100.0);
+            true
+        } else {
+            println!("⏳ {} should continue mining ({} contract materials, {}/{})", 
+                    ship.symbol, contract_material_count, ship.cargo.units, ship.cargo.capacity);
+            false
+        }
     }
 
     async fn assign_mining_task(&mut self, ship: &Ship, needed_materials: &[String], contract_id: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -576,40 +633,80 @@ impl FleetCoordinator {
     }
 
     async fn assign_cargo_management(&mut self, ship: &Ship, contract: &Contract) -> Result<(), Box<dyn std::error::Error>> {
-        // Determine what to do with cargo
+        println!("🗃️ {} cargo management - analyzing full cargo hold", ship.symbol);
+        
         let contract_materials: Vec<String> = contract.terms.deliver
             .iter()
             .map(|d| d.trade_symbol.clone())
             .collect();
 
-        // Check what cargo we have
-        let mut has_contract_items = false;
-        let mut has_sellable_items = false;
-
+        // Categorize cargo
+        let mut contract_items = Vec::new();
+        let mut sellable_items = Vec::new();
+        
         for item in &ship.cargo.inventory {
             if contract_materials.contains(&item.symbol) {
-                has_contract_items = true;
+                contract_items.push(item);
+                println!("   🎯 Contract: {} x{}", item.symbol, item.units);
             } else {
-                has_sellable_items = true;
+                sellable_items.push(item);
+                println!("   💰 Sellable: {} x{}", item.symbol, item.units);
             }
         }
 
-        if has_contract_items {
-            // Deliver contract items first
-            println!("📦 {} delivering contract materials", ship.symbol);
+        // Strategy: Prioritize contract items, then sell/jettison non-contract items
+        if !contract_items.is_empty() {
+            // Deliver contract items first if we have enough or cargo is very full
+            if self.should_deliver_cargo(ship, contract) {
+                println!("📦 {} delivering contract materials first", ship.symbol);
+                return self.assign_delivery_task(ship, contract).await;
+            }
+        }
+        
+        if !sellable_items.is_empty() {
+            // Try to sell non-contract items to make room
+            println!("💰 {} attempting to sell non-contract cargo", ship.symbol);
+            self.assign_smart_sell_or_jettison(ship, &sellable_items, &contract_materials).await
+        } else if !contract_items.is_empty() {
+            // Only contract items - deliver them
+            println!("📦 {} only has contract items - delivering", ship.symbol);
             self.assign_delivery_task(ship, contract).await
-        } else if has_sellable_items {
-            // Sell non-contract items
-            println!("💰 {} selling non-contract cargo", ship.symbol);
-            self.assign_sell_task(ship).await
         } else {
-            // Should not happen, but fallback to mining
-            println!("⚠️ {} cargo management fallback - return to mining", ship.symbol);
+            // Empty cargo (should not happen) - return to mining
+            println!("⚠️ {} empty cargo - return to mining", ship.symbol);
             let needed_materials: Vec<String> = contract.terms.deliver
                 .iter()
                 .map(|d| d.trade_symbol.clone())
                 .collect();
             self.assign_mining_task(ship, &needed_materials, &contract.id).await
+        }
+    }
+    
+    /// Smart sell or jettison: try to sell first, jettison if that fails
+    async fn assign_smart_sell_or_jettison(&mut self, ship: &Ship, sellable_items: &[&crate::models::CargoItem], contract_materials: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+        // Find best marketplace that can actually buy our cargo
+        match self.find_best_marketplace_for_cargo(ship, sellable_items).await {
+            Ok(marketplace) => {
+                println!("🏪 {} will sell at {} (compatible market)", ship.symbol, marketplace);
+                
+                // Create smart sell action that includes jettison fallback
+                let action = ShipAction::SmartSellOrJettison {
+                    marketplace,
+                    contract_materials: contract_materials.to_vec(),
+                };
+                
+                self.send_action_to_ship(&ship.symbol, action).await
+            }
+            Err(e) => {
+                println!("⚠️ {} no marketplace found ({}), will jettison directly", ship.symbol, e);
+                
+                // No marketplace available - jettison directly
+                let action = ShipAction::JettisonCargo {
+                    contract_materials: contract_materials.to_vec(),
+                };
+                
+                self.send_action_to_ship(&ship.symbol, action).await
+            }
         }
     }
 
@@ -780,6 +877,279 @@ impl FleetCoordinator {
                 waypoints.len(), system_symbol, marketplace_count);
         
         Ok(waypoints)
+    }
+    
+    /// Find the best marketplace that can actually buy the ship's cargo
+    pub async fn find_best_marketplace_for_cargo(&mut self, ship: &Ship, sellable_items: &[&crate::models::CargoItem]) -> Result<String, Box<dyn std::error::Error>> {
+        if sellable_items.is_empty() {
+            return Err("No sellable items to find market for".into());
+        }
+        
+        // Get all marketplaces in the current system using cached waypoints
+        let system = ship.nav.system_symbol.clone();
+        let waypoints = self.get_system_waypoints_cached(&system).await?.clone();
+        
+        let marketplaces: Vec<_> = waypoints.iter()
+            .filter(|w| w.traits.iter().any(|t| t.symbol == "MARKETPLACE"))
+            .collect();
+        
+        if marketplaces.is_empty() {
+            return Err("No marketplaces found in system".into());
+        }
+        
+        // Get cargo symbols we want to sell
+        let cargo_symbols: Vec<&str> = sellable_items.iter()
+            .map(|item| item.symbol.as_str())
+            .collect();
+        
+        println!("🔍 {} checking {} marketplaces for compatibility with cargo: {:?}", 
+                ship.symbol, marketplaces.len(), cargo_symbols);
+        
+        let mut best_market = None;
+        let mut best_compatibility_score = 0;
+        
+        // Check each marketplace
+        for marketplace_waypoint in marketplaces {
+            match self.client.get_market(&system, &marketplace_waypoint.symbol).await {
+                Ok(market) => {
+                    // Count how many of our items this market can buy
+                    let mut compatibility_score = 0;
+                    let mut compatible_items = Vec::new();
+                    
+                    for cargo_item in &cargo_symbols {
+                        let can_buy = market.imports.iter().any(|import| import.symbol == *cargo_item) ||
+                                     market.exchange.iter().any(|exchange| exchange.symbol == *cargo_item);
+                        
+                        if can_buy {
+                            compatibility_score += 1;
+                            compatible_items.push(*cargo_item);
+                        }
+                    }
+                    
+                    println!("   📊 {}: can buy {}/{} items {:?}", 
+                            marketplace_waypoint.symbol, 
+                            compatibility_score, 
+                            cargo_symbols.len(),
+                            compatible_items);
+                    
+                    if compatibility_score > best_compatibility_score {
+                        best_compatibility_score = compatibility_score;
+                        best_market = Some(marketplace_waypoint.symbol.clone());
+                    }
+                }
+                Err(e) => {
+                    println!("   ⚠️ Failed to get market data for {}: {}", marketplace_waypoint.symbol, e);
+                }
+            }
+        }
+        
+        if let Some(market) = best_market {
+            println!("✅ {} found best market: {} (compatibility: {}/{})", 
+                    ship.symbol, market, best_compatibility_score, cargo_symbols.len());
+            Ok(market)
+        } else {
+            Err(format!("No compatible marketplaces found for cargo: {:?}", cargo_symbols).into())
+        }
+    }
+    
+    /// Discover and integrate any new ships that aren't currently managed
+    async fn discover_new_ships(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Only check periodically to avoid excessive API calls
+        use std::sync::Mutex;
+        use std::time::{Instant, Duration};
+        
+        static LAST_DISCOVERY_CHECK: Mutex<Option<Instant>> = Mutex::new(None);
+        const CHECK_INTERVAL: Duration = Duration::from_secs(60); // Check every minute
+        
+        {
+            let mut last_check = LAST_DISCOVERY_CHECK.lock().unwrap();
+            if let Some(last_time) = *last_check {
+                if last_time.elapsed() < CHECK_INTERVAL {
+                    return Ok(()); // Too soon since last check
+                }
+            }
+            *last_check = Some(Instant::now());
+        }
+        
+        // Get current ships from API
+        let current_ships = match self.client.get_ships().await {
+            Ok(ships) => ships,
+            Err(e) => {
+                println!("⚠️ Failed to check for new ships: {}", e);
+                return Ok(()); // Don't fail the main loop over this
+            }
+        };
+        
+        // Find ships that aren't in our management system
+        let mut new_ships = Vec::new();
+        for ship in current_ships {
+            if !self.ship_queues.contains_key(&ship.symbol) {
+                new_ships.push(ship);
+            }
+        }
+        
+        if !new_ships.is_empty() {
+            println!("🔍 Discovered {} new ships not in fleet management:", new_ships.len());
+            for ship in new_ships {
+                println!("   🚢 Adding {} ({}) to active fleet", ship.symbol, ship.registration.role);
+                
+                if let Err(e) = self.spawn_ship_actor(ship.clone()).await {
+                    println!("   ⚠️ Failed to spawn actor for {}: {}", ship.symbol, e);
+                } else {
+                    // Cache the ship state
+                    if let Err(e) = self.ship_cache.cache_ship(ship.clone()) {
+                        println!("   ⚠️ Failed to cache ship {}: {}", ship.symbol, e);
+                    }
+                    println!("   ✅ {} now under fleet management", ship.symbol);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if we should purchase additional ships for fleet expansion
+    async fn check_ship_expansion(&mut self, contract: &Contract) -> Result<(), Box<dyn std::error::Error>> {
+        // Only check for expansion periodically to avoid spam
+        use std::sync::Mutex;
+        use std::time::{Instant, Duration};
+        
+        static LAST_CHECK: Mutex<Option<Instant>> = Mutex::new(None);
+        
+        {
+            let mut last_check = LAST_CHECK.lock().unwrap();
+            if let Some(last_time) = *last_check {
+                if last_time.elapsed() < Duration::from_secs(300) { // Check every 5 minutes
+                    return Ok(());
+                }
+            }
+            *last_check = Some(Instant::now());
+        }
+        
+        println!("🏗️ Checking fleet expansion opportunities...");
+        
+        // Get current agent info to check credits
+        let agent = self.client.get_agent().await?;
+        let current_ships = self.client.get_ships().await?;
+        
+        // Find our mining ships
+        let mining_ships: Vec<_> = current_ships.iter()
+            .filter(|s| s.mounts.iter().any(|m| m.symbol.contains("MINING")))
+            .collect();
+        
+        println!("📊 Current fleet: {} ships ({} miners)", current_ships.len(), mining_ships.len());
+        println!("💰 Available credits: {}", agent.credits);
+        
+        // Check if we should buy another mining ship
+        let should_expand = self.should_expand_fleet(&agent, &current_ships, contract).await;
+        
+        if should_expand && agent.credits >= 150000 { // Minimum for a decent mining ship
+            println!("🎯 Fleet expansion recommended - searching for shipyards...");
+            
+            // Try to find and purchase a ship
+            match self.attempt_ship_purchase(&agent, &mining_ships).await {
+                Ok(new_ship) => {
+                    println!("🎉 Successfully purchased new ship: {}", new_ship.symbol);
+                    println!("   🚢 Type: {} Frame: {}", new_ship.registration.role, new_ship.frame.symbol);
+                    println!("   ⛏️ Ready for mining operations!");
+                    
+                    // CRITICAL: Add the new ship to the fleet by spawning its actor
+                    if let Err(e) = self.spawn_ship_actor(new_ship.clone()).await {
+                        println!("⚠️ Failed to add new ship to fleet: {}", e);
+                        println!("   💡 Ship purchased but won't be active until next restart");
+                    } else {
+                        println!("✅ New ship {} added to active fleet management", new_ship.symbol);
+                        // Cache the new ship state
+                        if let Err(e) = self.ship_cache.cache_ship(new_ship) {
+                            println!("⚠️ Failed to cache new ship state: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️ Ship purchase failed: {}", e);
+                }
+            }
+        } else if should_expand {
+            let needed = 150000 - agent.credits;
+            println!("💸 Want to expand fleet but need {} more credits", needed);
+        }
+        
+        Ok(())
+    }
+    
+    /// Determine if we should expand the fleet
+    async fn should_expand_fleet(&self, agent: &crate::models::Agent, ships: &[crate::models::Ship], contract: &Contract) -> bool {
+        // Expansion criteria:
+        // 1. Have enough credits (150k+)
+        // 2. Contract is large enough to benefit from more ships
+        // 3. Don't have too many ships already
+        
+        let mining_ships = ships.iter().filter(|s| s.mounts.iter().any(|m| m.symbol.contains("MINING"))).count();
+        
+        // Calculate contract workload
+        let total_contract_units: i32 = contract.terms.deliver.iter().map(|d| d.units_required).sum();
+        let contract_value = contract.terms.payment.on_fulfilled;
+        
+        // Expansion logic (optimized for current situation)
+        let has_credits = agent.credits >= 150000; // Lower threshold to enable expansion sooner
+        let contract_is_large = total_contract_units >= 30 || contract_value >= 10000; // More accessible thresholds
+        let not_too_many_ships = mining_ships < 4; // Cap at 4 mining ships for now
+        let profitable = contract_value > 10000; // Lower profit threshold for smaller contracts
+        
+        if has_credits && contract_is_large && not_too_many_ships && profitable {
+            println!("✅ Fleet expansion criteria met:");
+            println!("   💰 Credits: {} >= 150,000", agent.credits);
+            println!("   📦 Contract size: {} units", total_contract_units);
+            println!("   💎 Contract value: {} credits", contract_value);
+            println!("   🚢 Current miners: {}/4", mining_ships);
+            true
+        } else {
+            println!("❌ Fleet expansion not recommended:");
+            if !has_credits { println!("   💸 Need more credits ({} < 150,000)", agent.credits); }
+            if !contract_is_large { println!("   📦 Contract too small ({} units, {} value)", total_contract_units, contract_value); }
+            if !not_too_many_ships { println!("   🚢 Already have enough miners ({})", mining_ships); }
+            if !profitable { println!("   💎 Contract not profitable enough ({} < 15,000)", contract_value); }
+            false
+        }
+    }
+    
+    /// Attempt to purchase a mining ship
+    async fn attempt_ship_purchase(&self, _agent: &crate::models::Agent, reference_ships: &[&crate::models::Ship]) -> Result<crate::models::Ship, Box<dyn std::error::Error>> {
+        // Use our shipyard operations system
+        let shipyard_ops = crate::operations::ShipyardOperations::new(self.client.clone());
+        
+        // Find shipyards
+        let shipyards = shipyard_ops.find_shipyards().await?;
+        
+        if shipyards.is_empty() {
+            return Err("No shipyards found - need to explore more systems".into());
+        }
+        
+        // Get reference mining ship configuration
+        let reference_ship = reference_ships.first()
+            .ok_or("No reference mining ship available")?;
+        
+        // Try each shipyard until we find one with suitable ships
+        for shipyard in shipyards {
+            println!("🏭 Checking shipyard at {}", shipyard.waypoint_symbol);
+            
+            match shipyard_ops.purchase_mining_ship(&shipyard, reference_ship).await {
+                Ok(new_ship) => {
+                    // Attempt to outfit the ship (may not have all required APIs yet)
+                    if let Err(e) = shipyard_ops.outfit_mining_ship(&new_ship, reference_ship).await {
+                        println!("⚠️ Ship outfitting incomplete: {}", e);
+                        println!("   💡 Ship can still be used for basic mining");
+                    }
+                    
+                    return Ok(new_ship);
+                }
+                Err(e) => {
+                    println!("   ❌ Purchase failed at {}: {}", shipyard.waypoint_symbol, e);
+                }
+            }
+        }
+        
+        Err("No suitable ships found at any available shipyard".into())
     }
     
 }
