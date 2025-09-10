@@ -44,9 +44,28 @@ impl<'a> ContractOperations<'a> {
         
         let contracts = self.get_contracts().await?;
         
+        println!("🔍 Contract Discovery Debug:");
+        println!("  📊 Total contracts returned by API: {}", contracts.len());
+        
         if contracts.is_empty() {
-            println!("⚠️ No contracts available");
-            return Ok(None);
+            println!("  ⚠️ No contracts available from API");
+            println!("  💡 Need to negotiate new contracts with faction waypoints");
+            return self.negotiate_new_contract().await;
+        }
+        
+        // Debug: Print details of all contracts
+        for (i, contract) in contracts.iter().enumerate() {
+            println!("  📝 Contract #{}: {}", i + 1, contract.id);
+            println!("    Status: Accepted={}, Fulfilled={}", contract.accepted, contract.fulfilled);
+            println!("    Type: {}", contract.contract_type);
+            println!("    Faction: {}", contract.faction_symbol);
+            if contract.fulfilled {
+                println!("    ✅ Already completed");
+            } else if contract.accepted {
+                println!("    🔄 In progress");
+            } else {
+                println!("    🆕 Available for acceptance");
+            }
         }
 
         // Find the best unaccepted contract
@@ -112,12 +131,15 @@ impl<'a> ContractOperations<'a> {
                     for contract in &fulfilled_contracts {
                         println!("    ✅ {} - COMPLETED", contract.id);
                     }
-                    println!("  🔍 No active contracts found - need to wait for new contracts");
+                    println!("  🔍 No active contracts found - attempting to negotiate new contracts");
                 } else {
-                    println!("  📋 No active contracts found");
+                    println!("  📋 No active contracts found - attempting to negotiate new contracts");
                 }
                 
-                Ok(None)
+                // All contracts are completed - need to negotiate new ones!
+                // This is the key issue: completed contracts block the 1-contract slot
+                println!("  🎯 All contracts completed - negotiating new contracts to replace completed ones");
+                self.negotiate_new_contract().await
             } else {
                 println!("  📋 Found {} active contract(s) to work on:", active_contracts.len());
                 for contract in &active_contracts {
@@ -424,5 +446,186 @@ impl<'a> ContractOperations<'a> {
         
         println!("\n🎉 AUTONOMOUS CONTRACT MANAGEMENT COMPLETE!");
         Ok(false)
+    }
+
+    /// Negotiate new contracts when needed (e.g., when all current contracts are completed)
+    /// 
+    /// Requirements for successful contract negotiation:
+    /// 1. Ship must be at a faction waypoint
+    /// 2. Ship must be DOCKED (will automatically dock if in orbit)
+    /// 3. Agent must have available contract slots (max 1 contract at a time)
+    /// 4. Ship must not be in transit
+    pub async fn negotiate_new_contract(&self) -> Result<Option<Contract>, Box<dyn std::error::Error>> {
+        println!("🤝 Starting contract negotiation process...");
+        
+        // Get ships that are at faction waypoints
+        let ships = self.client.get_ships().await?;
+        let mut suitable_ships = Vec::new();
+        
+        for ship in &ships {
+            // Skip ships that are in transit
+            if ship.nav.status == "IN_TRANSIT" {
+                println!("  ⚠️ {} in transit - skipping for contract negotiation", ship.symbol);
+                continue;
+            }
+            
+            // Get waypoint info to check for faction presence
+            let waypoint_parts: Vec<&str> = ship.nav.waypoint_symbol.split('-').collect();
+            let system_symbol = format!("{}-{}", waypoint_parts[0], waypoint_parts[1]);
+            
+            match self.client.get_waypoint(&system_symbol, &ship.nav.waypoint_symbol).await {
+                Ok(waypoint) => {
+                    if let Some(faction) = &waypoint.faction {
+                        println!("  ✅ {} at faction waypoint {} ({})", 
+                                ship.symbol, 
+                                waypoint.symbol, 
+                                faction.symbol);
+                        suitable_ships.push((ship, waypoint));
+                    } else {
+                        println!("  ❌ {} at {} (no faction)", ship.symbol, ship.nav.waypoint_symbol);
+                    }
+                }
+                Err(e) => {
+                    println!("  ⚠️ Could not check waypoint {} for {}: {}", 
+                            ship.nav.waypoint_symbol, ship.symbol, e);
+                }
+            }
+        }
+        
+        if suitable_ships.is_empty() {
+            println!("  ❌ No ships at faction waypoints for contract negotiation");
+            println!("  💡 Ships need to visit faction-controlled waypoints to negotiate contracts");
+            return Ok(None);
+        }
+        
+        // Try to negotiate with the first suitable ship
+        let (ship, waypoint) = &suitable_ships[0];
+        println!("  🤝 Attempting contract negotiation with {} at {}", ship.symbol, waypoint.symbol);
+        
+        // CRITICAL: Ship must be docked to negotiate contracts!
+        if ship.nav.status != "DOCKED" {
+            println!("  🛸 Ship not docked - docking {} at {}...", ship.symbol, waypoint.symbol);
+            match self.client.dock_ship(&ship.symbol).await {
+                Ok(_) => println!("    ✅ Successfully docked for contract negotiation"),
+                Err(e) => {
+                    println!("    ❌ Failed to dock {}: {}", ship.symbol, e);
+                    println!("    🔄 Trying next ship...");
+                    // Try with other ships if docking failed
+                    for (ship, waypoint) in suitable_ships.iter().skip(1).take(2) {
+                        println!("  🔄 Trying with {} at {}...", ship.symbol, waypoint.symbol);
+                        if ship.nav.status != "DOCKED" {
+                            if let Err(e) = self.client.dock_ship(&ship.symbol).await {
+                                println!("    ❌ Also failed to dock {}: {}", ship.symbol, e);
+                                continue;
+                            }
+                        }
+                        // Try to negotiate with this ship now that it's docked
+                        match self.client.negotiate_contract(&ship.symbol).await {
+                            Ok(new_contract) => {
+                                println!("  ✅ Success with docked ship {}! Contract: {}", ship.symbol, new_contract.id);
+                                match self.accept_contract(&new_contract.id).await {
+                                    Ok(_) => {
+                                        println!("  🤝 Contract {} accepted!", new_contract.id);
+                                        return Ok(Some(new_contract));
+                                    }
+                                    Err(e) => {
+                                        println!("  ⚠️ Could not accept: {}", e);
+                                        return Ok(Some(new_contract));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                println!("  ❌ Still failed with docked {}: {}", ship.symbol, e);
+                                continue;
+                            }
+                        }
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+        
+        match self.client.negotiate_contract(&ship.symbol).await {
+            Ok(new_contract) => {
+                println!("  ✅ Successfully negotiated new contract: {}", new_contract.id);
+                println!("    Faction: {}", new_contract.faction_symbol);
+                println!("    Type: {}", new_contract.contract_type);
+                println!("    Payment: {} on accepted, {} on fulfilled", 
+                        new_contract.terms.payment.on_accepted, 
+                        new_contract.terms.payment.on_fulfilled);
+                
+                // Show delivery requirements
+                for delivery in &new_contract.terms.deliver {
+                    println!("    📦 Deliver: {} x{} to {}", 
+                            delivery.trade_symbol, 
+                            delivery.units_required,
+                            delivery.destination_symbol);
+                }
+                
+                // Automatically accept the newly negotiated contract
+                match self.accept_contract(&new_contract.id).await {
+                    Ok(_) => {
+                        println!("  🤝 Contract {} accepted automatically!", new_contract.id);
+                        return Ok(Some(new_contract));
+                    }
+                    Err(e) => {
+                        println!("  ⚠️ Could not accept negotiated contract: {}", e);
+                        // Still return the contract even if acceptance failed
+                        return Ok(Some(new_contract));
+                    }
+                }
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                if error_msg.contains("400 Bad Request") {
+                    println!("  ❌ Contract negotiation failed: Ship not at faction waypoint or other requirement not met");
+                    println!("    Details: {}", error_msg);
+                } else if error_msg.contains("409") {
+                    println!("  ❌ Contract negotiation failed: Already have maximum contracts (1)");
+                    println!("    💡 This suggests the completed contract is still blocking the slot");
+                } else {
+                    println!("  ❌ Contract negotiation failed: {}", error_msg);
+                }
+                
+                // Try with other ships if available
+                for (ship, waypoint) in suitable_ships.iter().skip(1).take(2) {
+                    println!("  🔄 Trying with {} at {}...", ship.symbol, waypoint.symbol);
+                    
+                    // Ensure ship is docked before negotiating
+                    if ship.nav.status != "DOCKED" {
+                        if let Err(e) = self.client.dock_ship(&ship.symbol).await {
+                            println!("    ❌ Failed to dock {}: {}", ship.symbol, e);
+                            continue;
+                        }
+                        println!("    ✅ {} docked for negotiation", ship.symbol);
+                    }
+                    
+                    match self.client.negotiate_contract(&ship.symbol).await {
+                        Ok(new_contract) => {
+                            println!("  ✅ Success with {}! Contract: {}", ship.symbol, new_contract.id);
+                            
+                            // Auto-accept
+                            match self.accept_contract(&new_contract.id).await {
+                                Ok(_) => {
+                                    println!("  🤝 Contract {} accepted!", new_contract.id);
+                                    return Ok(Some(new_contract));
+                                }
+                                Err(e) => {
+                                    println!("  ⚠️ Could not accept: {}", e);
+                                    return Ok(Some(new_contract));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("  ❌ Also failed with {}: {}", ship.symbol, e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("  ❌ All contract negotiation attempts failed");
+        println!("  💡 Will continue autonomous operations without contracts");
+        Ok(None)
     }
 }

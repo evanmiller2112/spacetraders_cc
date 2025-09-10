@@ -14,6 +14,9 @@ pub struct SpaceTradersClient {
     debug_mode: bool,
     api_logging: bool,
     last_request_time: std::sync::Arc<TokioMutex<Option<Instant>>>,
+    // Global rate limiting state
+    global_backoff_until: std::sync::Arc<TokioMutex<Option<Instant>>>,
+    rate_limit_backoff_duration: std::sync::Arc<TokioMutex<Duration>>,
 }
 
 impl SpaceTradersClient {
@@ -36,6 +39,8 @@ impl SpaceTradersClient {
             debug_mode: false,
             api_logging: false,
             last_request_time: std::sync::Arc::new(TokioMutex::new(None)),
+            global_backoff_until: std::sync::Arc::new(TokioMutex::new(None)),
+            rate_limit_backoff_duration: std::sync::Arc::new(TokioMutex::new(Duration::from_secs(1))),
         }
     }
     
@@ -48,7 +53,23 @@ impl SpaceTradersClient {
     }
     
     /// Enforce rate limiting: SpaceTraders allows 2 requests per second with burst of 30
+    /// Now with GLOBAL backoff - if ANY request hits rate limit, ALL requests wait
     async fn enforce_rate_limit(&self) {
+        // FIRST: Check global backoff state
+        {
+            let global_backoff = self.global_backoff_until.lock().await;
+            if let Some(backoff_until) = *global_backoff {
+                let now = Instant::now();
+                if now < backoff_until {
+                    let remaining = backoff_until - now;
+                    drop(global_backoff); // Release lock before sleeping
+                    println!("🌐 GLOBAL RATE LIMIT: Waiting {:.1}s (all API calls paused)", remaining.as_secs_f64());
+                    sleep(remaining).await;
+                }
+            }
+        }
+        
+        // SECOND: Normal per-request rate limiting
         const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(500); // 2 req/sec = 500ms between requests
         
         let mut last_time = self.last_request_time.lock().await;
@@ -56,13 +77,16 @@ impl SpaceTradersClient {
             let elapsed = last.elapsed();
             if elapsed < MIN_REQUEST_INTERVAL {
                 let sleep_duration = MIN_REQUEST_INTERVAL - elapsed;
+                drop(last_time); // Release lock before sleeping
                 sleep(sleep_duration).await;
+                last_time = self.last_request_time.lock().await;
             }
         }
         *last_time = Some(Instant::now());
     }
     
-    /// Handle 429 rate limit errors with exponential backoff
+    /// Handle 429 rate limit errors with GLOBAL backoff
+    /// When ANY request hits rate limit, ALL subsequent requests are paused
     async fn handle_rate_limit_error(&self, retry_after: Option<f64>) {
         let sleep_duration = if let Some(retry_after) = retry_after {
             // Use the server-provided retry time
@@ -72,8 +96,32 @@ impl SpaceTradersClient {
             Duration::from_secs(1)
         };
         
-        println!("⚠️ Rate limit hit, waiting {:.1}s before retry", sleep_duration.as_secs_f64());
+        // Set GLOBAL backoff - all API calls will wait until this time
+        let backoff_until = Instant::now() + sleep_duration;
+        {
+            let mut global_backoff = self.global_backoff_until.lock().await;
+            *global_backoff = Some(backoff_until);
+        }
+        
+        // Update the backoff duration for progressive backoff
+        {
+            let mut backoff_duration = self.rate_limit_backoff_duration.lock().await;
+            *backoff_duration = (*backoff_duration * 2).min(Duration::from_secs(10)); // Cap at 10 seconds
+        }
+        
+        println!("🌐 GLOBAL RATE LIMIT: All API calls paused for {:.1}s", sleep_duration.as_secs_f64());
         sleep(sleep_duration).await;
+    }
+    
+    /// Reset global backoff on successful requests
+    async fn reset_global_backoff(&self) {
+        let mut global_backoff = self.global_backoff_until.lock().await;
+        if global_backoff.is_some() {
+            *global_backoff = None;
+            // Reset backoff duration to initial value
+            let mut backoff_duration = self.rate_limit_backoff_duration.lock().await;
+            *backoff_duration = Duration::from_secs(1);
+        }
     }
     
     /// Parse retry-after from 429 response
@@ -104,7 +152,11 @@ impl SpaceTradersClient {
             self.enforce_rate_limit().await;
             
             match request_fn().await {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    // Reset global backoff on successful request
+                    self.reset_global_backoff().await;
+                    return Ok(result);
+                }
                 Err(error_msg) => {
                     // Check if it's a 429 rate limit error
                     if error_msg.contains("429") && error_msg.contains("Too Many Requests") {
@@ -340,6 +392,40 @@ impl SpaceTradersClient {
 
         let delivery_response: DeliverCargoResponse = response.json().await?;
         Ok(delivery_response.data)
+    }
+
+    pub async fn negotiate_contract(&self, ship_symbol: &str) -> Result<Contract, Box<dyn std::error::Error>> {
+        crate::debug_fn_enter!("SpaceTradersClient::negotiate_contract", "ship_symbol={}", ship_symbol);
+        
+        let url = format!("{}/my/ships/{}/negotiate/contract", API_BASE_URL, ship_symbol);
+        let payload = serde_json::json!({});
+        crate::debug_api_call!("POST", &url, &payload);
+        
+        if !self.request_approval("POST", &url, Some(&payload.to_string())).await {
+            let error = Err("API call not approved".into());
+            crate::debug_fn_exit!("SpaceTradersClient::negotiate_contract", &error);
+            return error;
+        }
+        
+        let response = self.client.post(&url).json(&payload).send().await?;
+        let status = response.status();
+        
+        if !response.status().is_success() {
+            let error_body = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            self.log_api_call("POST", &url, Some(&payload.to_string()), status.as_u16(), Some(&error_body));
+            let error = Err(format!("Contract negotiation failed with status: {}", status).into());
+            crate::debug_fn_exit!("SpaceTradersClient::negotiate_contract", &error);
+            return error;
+        }
+        
+        let response_text = response.text().await?;
+        self.log_api_call("POST", &url, Some(&payload.to_string()), status.as_u16(), Some(&response_text));
+        
+        let negotiate_response: serde_json::Value = serde_json::from_str(&response_text)?;
+        let contract = serde_json::from_value(negotiate_response["data"]["contract"].clone())?;
+        let result = Ok(contract);
+        crate::debug_fn_exit!("SpaceTradersClient::negotiate_contract", &result);
+        result
     }
 
     pub async fn fulfill_contract(&self, contract_id: &str) -> Result<FulfillContractData, Box<dyn std::error::Error>> {

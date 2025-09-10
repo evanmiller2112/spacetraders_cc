@@ -523,8 +523,24 @@ impl FleetCoordinator {
                     }
                 }
                 Err(e) => {
-                    println!("⚠️ {} fuel check failed: {}, including anyway", asteroid.symbol, e);
-                    fuel_safe_asteroids.push(asteroid); // Include if check fails
+                    println!("⚠️ {} fuel check failed: {}", asteroid.symbol, e);
+                    
+                    // Fallback: Basic distance-based fuel estimation when API fails
+                    let ship_coords = (ship.nav.route.origin.x, ship.nav.route.origin.y);
+                    let asteroid_coords = (asteroid.x, asteroid.y);
+                    
+                    let distance = (((asteroid_coords.0 - ship_coords.0).pow(2) + (asteroid_coords.1 - ship_coords.1).pow(2)) as f64).sqrt();
+                    let estimated_fuel_needed = (distance / 10.0).ceil() as i32; // Rough estimate: 1 fuel per 10 distance units
+                    let fuel_with_safety = estimated_fuel_needed + 10; // Add 10 fuel safety buffer
+                    
+                    if ship.fuel.current >= fuel_with_safety {
+                        println!("✅ {} passes fallback fuel check: {} fuel available, ~{} estimated needed", 
+                                asteroid.symbol, ship.fuel.current, fuel_with_safety);
+                        fuel_safe_asteroids.push(asteroid);
+                    } else {
+                        println!("❌ {} fails fallback fuel check: {} fuel available, ~{} estimated needed", 
+                                asteroid.symbol, ship.fuel.current, fuel_with_safety);
+                    }
                 }
             }
         }

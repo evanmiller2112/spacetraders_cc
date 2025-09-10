@@ -7,7 +7,7 @@
 # Minimum credits required to consider buying a new ship
 min_credits_for_ship_purchase = 50000
 # Maximum number of mining ships to maintain  
-max_mining_ships = 999
+max_mining_ships = 5
 # Credits threshold for fleet expansion consideration
 fleet_expansion_threshold = 70000
 
@@ -37,7 +37,7 @@ cache_duration_seconds = 30
 
 [timing]
 # Main cycle delay in seconds
-main_cycle_delay_seconds = 2
+main_cycle_delay_seconds = 10
 # Retry delay after errors in seconds  
 error_retry_delay_seconds = 60
 # Config hot-reload check interval in seconds
