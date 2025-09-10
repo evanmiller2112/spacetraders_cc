@@ -15,3 +15,4 @@ tokio = { version = "1.0", features = ["full", "signal"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.0", features = ["derive"] }
 toml = "0.8"
+async-trait = "0.1.89"

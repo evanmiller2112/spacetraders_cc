@@ -1,7 +1,7 @@
 // Contract operations module
 use crate::client::SpaceTradersClient;
 use crate::models::*;
-use crate::operations::ShipOperations;
+use crate::operations::{ShipOperations, ProductKnowledge};
 use crate::{o_error, o_summary, o_info, o_debug};
 use tokio::time::{sleep, Duration};
 
@@ -680,7 +680,7 @@ impl<'a> ContractOperations<'a> {
                 o_info!("  🏭 {} is a manufactured good - requires marketplace purchase", delivery.trade_symbol);
                 
                 // Find marketplaces and trading ships
-                match self.find_trading_opportunities(&delivery.trade_symbol, needed as i64).await {
+                match self.find_trading_opportunities(&delivery.trade_symbol, needed as i64, Some(&contract.id), Some(&delivery.destination_symbol)).await {
                     Ok(trading_plan) => {
                         if trading_plan.is_some() {
                             o_info!("  ✅ Trading opportunities found for {}", delivery.trade_symbol);
@@ -701,30 +701,86 @@ impl<'a> ContractOperations<'a> {
         Ok(false)
     }
     
-    /// Find trading opportunities for a specific good
-    async fn find_trading_opportunities(&self, good: &str, needed: i64) -> Result<Option<TradingPlan>, Box<dyn std::error::Error>> {
-        o_info!("  🔍 Searching for {} trading opportunities...", good);
+    /// Find trading opportunities for a specific good using product knowledge
+    async fn find_trading_opportunities(&self, good: &str, needed: i64, contract_id: Option<&str>, delivery_destination: Option<&str>) -> Result<Option<TradingPlan>, Box<dyn std::error::Error>> {
+        o_info!("  🔍 Searching for {} trading opportunities using product knowledge...", good);
+        
+        let product_db = ProductKnowledge::new();
         
         // Get agent budget
         let agent = self.client.get_agent().await?;
         let budget = agent.credits;
-        let max_price_per_unit = budget / needed;
+        
+        // Use product-specific reasonable pricing instead of budget/needed
+        let max_reasonable_price = product_db.get_max_reasonable_price(good);
         
         o_info!("    💰 Budget: {} credits", budget);
-        o_info!("    📈 Max price per unit: {} credits", max_price_per_unit);
+        o_info!("    📈 Max reasonable price per unit: {} credits", max_reasonable_price);
         
-        if max_price_per_unit < 100 {
-            o_info!("    ⚠️ Budget too low for marketplace trading - need to continue mining");
+        // Check if we have enough budget for at least some units
+        let min_purchase_size = 10; // Try to buy at least 10 units
+        let min_required_budget = min_purchase_size * max_reasonable_price;
+        
+        if budget < min_required_budget {
+            o_info!("    ⚠️ Budget too low for marketplace trading - need {} credits minimum", min_required_budget);
             return Ok(None);
         }
         
-        // Get all waypoints in current system
-        let waypoints = self.client.get_system_waypoints("X1-N5", None).await?;
-        let marketplaces: Vec<_> = waypoints.iter()
-            .filter(|w| w.traits.iter().any(|t| t.symbol == "MARKETPLACE"))
-            .collect();
+        // Get preferred waypoint traits for this product
+        let preferred_traits = product_db.get_preferred_traits(good);
+        o_info!("    🎯 Looking for waypoints with traits: {:?}", preferred_traits);
         
-        o_info!("    🏪 Found {} marketplaces to check", marketplaces.len());
+        // Find ships to determine which systems to search
+        let ships = self.client.get_ships().await?;
+        let mut target_systems = std::collections::HashSet::new();
+        
+        // Collect systems where our ships are located
+        for ship in &ships {
+            if let Some(system) = self.extract_system_from_waypoint(&ship.nav.waypoint_symbol) {
+                target_systems.insert(system);
+            }
+        }
+        
+        if target_systems.is_empty() {
+            target_systems.insert("X1-N5".to_string()); // Fallback to default system
+        }
+        
+        o_info!("    🗺️ Searching systems: {:?}", target_systems);
+        
+        // Find marketplaces with preferred traits in target systems
+        let mut candidate_marketplaces = Vec::new();
+        
+        for system_symbol in target_systems {
+            match self.client.get_system_waypoints(&system_symbol, None).await {
+                Ok(waypoints) => {
+                    let system_marketplaces: Vec<_> = waypoints.iter()
+                        .filter(|w| {
+                            // Must have MARKETPLACE trait
+                            let has_marketplace = w.traits.iter().any(|t| t.symbol == "MARKETPLACE");
+                            // Prefer waypoints with product-specific traits
+                            let has_preferred_trait = preferred_traits.iter()
+                                .any(|&pref_trait| w.traits.iter().any(|t| t.symbol == pref_trait));
+                            
+                            has_marketplace && (has_preferred_trait || preferred_traits.contains(&"MARKETPLACE"))
+                        })
+                        .cloned()
+                        .collect();
+                    
+                    o_info!("    🏪 Found {} suitable marketplaces in {}", system_marketplaces.len(), system_symbol);
+                    candidate_marketplaces.extend(system_marketplaces);
+                }
+                Err(e) => {
+                    o_error!("    ⚠️ Failed to get waypoints for system {}: {}", system_symbol, e);
+                }
+            }
+        }
+        
+        o_info!("    🏪 Found {} candidate marketplaces to check", candidate_marketplaces.len());
+        
+        if candidate_marketplaces.is_empty() {
+            o_info!("    ❌ No suitable marketplaces found");
+            return Ok(None);
+        }
         
         // Find a suitable scout ship (prefer SATELLITE)
         let ships = self.client.get_ships().await?;
@@ -745,7 +801,7 @@ impl<'a> ContractOperations<'a> {
         // Scout each marketplace for the good
         let mut best_option: Option<(String, i64, i64)> = None; // (marketplace, price, available)
         
-        for marketplace in &marketplaces {
+        for marketplace in &candidate_marketplaces {
             o_debug!("    🏪 Scouting {} for {}...", marketplace.symbol, good);
             
             // Navigate scout ship to marketplace if needed
@@ -789,8 +845,11 @@ impl<'a> ContractOperations<'a> {
                 }
             }
             
-            // Check market for the good
-            match self.client.get_market("X1-N5", &marketplace.symbol).await {
+            // Check market for the good (extract system from marketplace waypoint)
+            let system_symbol = self.extract_system_from_waypoint(&marketplace.symbol);
+            let system_symbol = system_symbol.as_deref().unwrap_or("X1-N5");
+            
+            match self.client.get_market(system_symbol, &marketplace.symbol).await {
                 Ok(market) => {
                     if let Some(trade_goods) = &market.trade_goods {
                         if let Some(item) = trade_goods.iter().find(|g| g.symbol == good) {
@@ -798,7 +857,17 @@ impl<'a> ContractOperations<'a> {
                             o_debug!("          💰 Price: {} credits/unit", item.purchase_price);
                             o_debug!("          📦 Available: {} units", item.trade_volume);
                             
-                            if i64::from(item.purchase_price) <= max_price_per_unit && i64::from(item.trade_volume) >= needed {
+                            // Use product knowledge for pricing and supply logic
+                            let price_reasonable = product_db.is_reasonable_price(good, item.purchase_price.into());
+                            let transaction_limit = product_db.get_transaction_limit(good);
+                            let can_fulfill = if let Some(_limit) = transaction_limit {
+                                // Can handle transaction limits with multiple purchases
+                                item.trade_volume > 0
+                            } else {
+                                i64::from(item.trade_volume) >= needed
+                            };
+                            
+                            if price_reasonable && can_fulfill {
                                 o_debug!("          🎯 VIABLE OPTION: Within budget and sufficient supply");
                                 
                                 // Check if this is better than current best option
@@ -812,11 +881,13 @@ impl<'a> ContractOperations<'a> {
                                     o_debug!("          ⭐ NEW BEST OPTION");
                                 }
                             } else {
-                                if i64::from(item.purchase_price) > max_price_per_unit {
-                                    o_debug!("          ❌ Too expensive: {} > {} max", item.purchase_price, max_price_per_unit);
+                                if !product_db.is_reasonable_price(good, item.purchase_price.into()) {
+                                    o_debug!("          ❌ Price unreasonable: {} credits (max reasonable: {})", item.purchase_price, max_reasonable_price);
                                 }
-                                if i64::from(item.trade_volume) < needed {
-                                    o_debug!("          ❌ Insufficient supply: {} < {} needed", item.trade_volume, needed);
+                                if item.trade_volume == 0 {
+                                    o_debug!("          ❌ No supply available");
+                                } else if transaction_limit.is_none() && i64::from(item.trade_volume) < needed {
+                                    o_debug!("          ❌ Insufficient supply: {} < {} needed (no transaction limit support)", item.trade_volume, needed);
                                 }
                             }
                         } else {
@@ -837,46 +908,96 @@ impl<'a> ContractOperations<'a> {
         if let Some((marketplace, price, _available)) = best_option {
             let total_cost = needed * price;
             
-            // Find a suitable trading ship (prefer COMMAND with high cargo capacity)
-            let trading_ship = ships.iter()
-                .filter(|ship| ship.nav.status != "IN_TRANSIT")
-                .filter(|ship| ship.cargo.capacity >= needed as i32)
-                .max_by_key(|ship| ship.cargo.capacity);
+            // Try multi-ship cargo distribution
+            let ship_allocations = self.distribute_cargo_across_fleet(needed, &ships);
             
-            if let Some(ship) = trading_ship {
-                o_info!("    ✅ TRADING PLAN CREATED:");
-                o_info!("      🏪 Source: {}", marketplace);
-                o_info!("      💰 Price: {} credits/unit", price);
-                o_info!("      📦 Quantity: {} units", needed);
-                o_summary!("      💸 Total cost: {} credits", total_cost);
-                o_info!("      🚢 Trading ship: {} (capacity: {})", ship.symbol, ship.cargo.capacity);
+            if !ship_allocations.is_empty() {
+                let total_capacity: i32 = ship_allocations.iter().map(|a| a.units_to_purchase).sum();
                 
-                let trading_plan = TradingPlan {
-                    good: good.to_string(),
-                    quantity: needed,
-                    source_marketplace: marketplace,
-                    price_per_unit: price,
-                    total_cost,
-                    assigned_ship: ship.symbol.clone(),
-                };
-                
-                // Execute the trading plan immediately
-                o_info!("    🚀 Executing trading plan...");
-                match self.execute_trading_plan(&trading_plan).await {
-                    Ok(success) => {
-                        if success {
-                            o_summary!("    ✅ Trading plan executed successfully!");
-                            return Ok(Some(trading_plan));
-                        } else {
-                            o_error!("    ❌ Trading plan execution failed");
+                if total_capacity >= needed as i32 {
+                    o_info!("    ✅ TRADING PLAN CREATED:");
+                    o_info!("      🏪 Source: {}", marketplace);
+                    o_info!("      💰 Price: {} credits/unit", price);
+                    o_info!("      📦 Quantity: {} units", needed);
+                    o_summary!("      💸 Total cost: {} credits", total_cost);
+                    o_info!("      🚢 Multi-ship allocation ({} ships):", ship_allocations.len());
+                    for allocation in &ship_allocations {
+                        o_info!("         • {}: {} units (space: {})", allocation.ship_symbol, 
+                               allocation.units_to_purchase, allocation.available_cargo_space);
+                    }
+                    
+                    // Execute trading plans for each ship
+                    o_info!("    🚀 Executing multi-ship trading plans...");
+                    let mut all_successful = true;
+                    let mut total_purchased = 0i32;
+                    
+                    for allocation in &ship_allocations {
+                        let ship_plan = TradingPlan {
+                            good: good.to_string(),
+                            quantity: allocation.units_to_purchase as i64,
+                            source_marketplace: marketplace.clone(),
+                            price_per_unit: price,
+                            total_cost: allocation.units_to_purchase as i64 * price,
+                            assigned_ship: allocation.ship_symbol.clone(),
+                            contract_id: contract_id.map(|s| s.to_string()),
+                            delivery_destination: delivery_destination.map(|s| s.to_string()),
+                        };
+                        
+                        o_info!("      🚢 Executing plan for {} ({} units)...", allocation.ship_symbol, allocation.units_to_purchase);
+                        
+                        match self.execute_trading_plan(&ship_plan).await {
+                            Ok(success) => {
+                                if success {
+                                    total_purchased += allocation.units_to_purchase;
+                                    o_info!("      ✅ {} completed purchase", allocation.ship_symbol);
+                                } else {
+                                    o_error!("      ❌ {} purchase failed", allocation.ship_symbol);
+                                    all_successful = false;
+                                }
+                            }
+                            Err(e) => {
+                                o_error!("      ❌ {} error: {}", allocation.ship_symbol, e);
+                                all_successful = false;
+                            }
                         }
                     }
-                    Err(e) => {
-                        o_error!("    ❌ Error executing trading plan: {}", e);
+                    
+                    if all_successful {
+                        o_summary!("    ✅ Multi-ship trading plan executed successfully!");
+                        o_summary!("      📦 Total purchased: {} units across {} ships", total_purchased, ship_allocations.len());
+                        
+                        // Return a representative plan for the successful multi-ship operation
+                        let representative_plan = TradingPlan {
+                            good: good.to_string(),
+                            quantity: total_purchased as i64,
+                            source_marketplace: marketplace,
+                            price_per_unit: price,
+                            total_cost: total_purchased as i64 * price,
+                            assigned_ship: format!("MULTI_SHIP_{}_SHIPS", ship_allocations.len()),
+                            contract_id: contract_id.map(|s| s.to_string()),
+                            delivery_destination: delivery_destination.map(|s| s.to_string()),
+                        };
+                        return Ok(Some(representative_plan));
+                    } else {
+                        o_error!("    ⚠️ Multi-ship trading partially failed (purchased: {} units)", total_purchased);
+                        if total_purchased > 0 {
+                            // Partial success is still progress
+                            let partial_plan = TradingPlan {
+                                good: good.to_string(),
+                                quantity: total_purchased as i64,
+                                source_marketplace: marketplace,
+                                price_per_unit: price,
+                                total_cost: total_purchased as i64 * price,
+                                assigned_ship: format!("PARTIAL_MULTI_SHIP_{}_SHIPS", ship_allocations.len()),
+                                contract_id: contract_id.map(|s| s.to_string()),
+                                delivery_destination: delivery_destination.map(|s| s.to_string()),
+                            };
+                            return Ok(Some(partial_plan));
+                        }
                     }
+                } else {
+                    o_error!("    ❌ No suitable trading ship found with capacity >= {}", needed);
                 }
-            } else {
-                o_error!("    ❌ No suitable trading ship found with capacity >= {}", needed);
             }
         } else {
             o_error!("    ❌ No viable trading opportunities found for {}", good);
@@ -918,27 +1039,280 @@ impl<'a> ContractOperations<'a> {
             }
         }
         
-        // Purchase the goods
-        o_info!("    💰 Purchasing {} {} at {} credits/unit...", plan.quantity, plan.good, plan.price_per_unit);
+        // Cargo management - ensure sufficient space for purchase
+        o_info!("    📦 Checking cargo space before purchase...");
+        let ship = self.client.get_ship(&ship.symbol).await?;
+        let needed_space = plan.quantity as i32;
+        let available_space = ship.cargo.capacity - ship.cargo.units;
         
-        match self.client.purchase_cargo(&ship.symbol, &plan.good, plan.quantity as i32).await {
-            Ok(purchase_data) => {
-                o_summary!("    ✅ Purchase successful!");
-                o_summary!("      📦 Purchased: {} {}", purchase_data.transaction.units, purchase_data.transaction.trade_symbol);
-                o_summary!("      💸 Total cost: {} credits", purchase_data.transaction.total_price);
-                o_summary!("      💰 Remaining credits: {}", purchase_data.agent.credits);
+        if available_space < needed_space {
+            let space_to_clear = needed_space - available_space;
+            o_info!("    ⚠️ Need to clear {} cargo units (available: {}, needed: {})", 
+                   space_to_clear, available_space, needed_space);
+            
+            // Try to sell non-contract cargo first
+            let mut space_cleared = 0;
+            for cargo_item in &ship.cargo.inventory {
+                if space_cleared >= space_to_clear {
+                    break;
+                }
                 
-                return Ok(true);
+                // Don't sell contract materials - basic heuristic
+                if cargo_item.symbol.contains("ORE") || cargo_item.symbol.contains("CRYSTAL") {
+                    continue;
+                }
+                
+                o_info!("    💰 Attempting to sell {} {} to make space...", cargo_item.units, cargo_item.symbol);
+                
+                match self.client.sell_cargo(&ship.symbol, &cargo_item.symbol, cargo_item.units).await {
+                    Ok(sell_data) => {
+                        space_cleared += cargo_item.units;
+                        o_info!("    ✅ Sold {} {} for {} credits (space cleared: {})", 
+                               cargo_item.units, cargo_item.symbol, sell_data.transaction.total_price, space_cleared);
+                    }
+                    Err(e) => {
+                        // If selling fails, try jettisoning as last resort
+                        o_info!("    ⚠️ Selling failed ({}), jettisoning instead...", e);
+                        match self.client.jettison_cargo(&ship.symbol, &cargo_item.symbol, cargo_item.units).await {
+                            Ok(_) => {
+                                space_cleared += cargo_item.units;
+                                o_info!("    🗑️ Jettisoned {} {} (space cleared: {})", 
+                                       cargo_item.units, cargo_item.symbol, space_cleared);
+                            }
+                            Err(je) => {
+                                o_error!("    ❌ Failed to clear cargo: {}", je);
+                            }
+                        }
+                    }
+                }
             }
-            Err(e) => {
-                o_error!("    ❌ Purchase failed: {}", e);
+            
+            if space_cleared < space_to_clear {
+                o_error!("    ❌ Could not clear enough cargo space (cleared: {}, needed: {})", 
+                        space_cleared, space_to_clear);
                 return Ok(false);
+            } else {
+                o_info!("    ✅ Cleared {} cargo units successfully", space_cleared);
+            }
+        } else {
+            o_info!("    ✅ Sufficient cargo space available ({} units)", available_space);
+        }
+        
+        // Purchase the goods with transaction limit handling
+        let product_db = ProductKnowledge::new();
+        let transaction_limit = product_db.get_transaction_limit(&plan.good);
+        
+        o_info!("    💰 Purchasing {} {} at {} credits/unit...", plan.quantity, plan.good, plan.price_per_unit);
+        if let Some(limit) = transaction_limit {
+            o_info!("    📋 Transaction limit: {} units per purchase", limit);
+        }
+        
+        let mut remaining_to_purchase = plan.quantity as i32;
+        let mut total_purchased = 0i32;
+        let mut total_cost = 0i64;
+        let mut final_credits = 0i64;
+        
+        while remaining_to_purchase > 0 {
+            let purchase_amount = if let Some(limit) = transaction_limit {
+                std::cmp::min(remaining_to_purchase, limit)
+            } else {
+                remaining_to_purchase
+            };
+            
+            o_info!("    🛒 Attempting to purchase {} units (remaining: {})", purchase_amount, remaining_to_purchase);
+            
+            match self.client.purchase_cargo(&ship.symbol, &plan.good, purchase_amount).await {
+                Ok(purchase_data) => {
+                    total_purchased += purchase_data.transaction.units;
+                    total_cost += purchase_data.transaction.total_price as i64;
+                    final_credits = purchase_data.agent.credits;
+                    remaining_to_purchase -= purchase_data.transaction.units;
+                    
+                    o_info!("    ✅ Purchased {} units (total so far: {})", 
+                           purchase_data.transaction.units, total_purchased);
+                    
+                    if remaining_to_purchase <= 0 {
+                        break;
+                    }
+                    
+                    // Small delay between transactions to avoid rate limiting
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+                Err(e) => {
+                    if total_purchased > 0 {
+                        o_error!("    ⚠️ Partial purchase completed: {} units bought, but {} failed: {}", 
+                                total_purchased, remaining_to_purchase, e);
+                        break;
+                    } else {
+                        o_error!("    ❌ Purchase failed: {}", e);
+                        return Ok(false);
+                    }
+                }
             }
         }
+        
+        if total_purchased > 0 {
+            o_summary!("    ✅ Purchase completed!");
+            o_summary!("      📦 Total purchased: {} {}", total_purchased, plan.good);
+            o_summary!("      💸 Total cost: {} credits", total_cost);
+            o_summary!("      💰 Remaining credits: {}", final_credits);
+            
+            if remaining_to_purchase > 0 {
+                o_info!("      ⚠️ Partial fulfillment: {} units not purchased", remaining_to_purchase);
+            }
+            
+            // Contract delivery integration
+            if let (Some(contract_id), Some(delivery_dest)) = (&plan.contract_id, &plan.delivery_destination) {
+                o_info!("    🚚 Starting contract delivery to {}...", delivery_dest);
+                
+                // Navigate to delivery destination
+                let ship = self.client.get_ship(&plan.assigned_ship).await?;
+                if ship.nav.waypoint_symbol != *delivery_dest {
+                    o_info!("    🚀 Navigating {} to delivery destination {}...", ship.symbol, delivery_dest);
+                    
+                    if ship.nav.status == "DOCKED" {
+                        self.client.orbit_ship(&ship.symbol).await?;
+                    }
+                    
+                    self.client.navigate_ship(&ship.symbol, delivery_dest).await?;
+                    
+                    // Wait for arrival (simplified - could be improved with proper arrival time checking)
+                    o_info!("    ⏳ Waiting for arrival at delivery destination...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                }
+                
+                // Dock at delivery destination
+                match self.client.dock_ship(&ship.symbol).await {
+                    Ok(_) => o_info!("    ✅ Docked at delivery destination"),
+                    Err(e) => {
+                        if !e.to_string().contains("already docked") {
+                            o_error!("    ⚠️ Failed to dock at delivery destination: {}", e);
+                        }
+                    }
+                }
+                
+                // Deliver cargo to contract
+                let ship = self.client.get_ship(&plan.assigned_ship).await?;
+                let mut total_delivered = 0i32;
+                
+                // Find the purchased goods in cargo and deliver them
+                for cargo_item in &ship.cargo.inventory {
+                    if cargo_item.symbol == plan.good {
+                        let units_to_deliver = std::cmp::min(cargo_item.units, total_purchased - total_delivered);
+                        
+                        if units_to_deliver > 0 {
+                            o_info!("    📦 Delivering {} units of {} to contract...", units_to_deliver, plan.good);
+                            
+                            match self.deliver_cargo(&ship.symbol, contract_id, &plan.good, units_to_deliver).await {
+                                Ok(delivery_data) => {
+                                    total_delivered += units_to_deliver;
+                                    o_summary!("    ✅ DELIVERED {} units to contract!", units_to_deliver);
+                                    
+                                    // Show updated contract progress
+                                    if let Some(delivery_req) = delivery_data.contract.terms.deliver
+                                        .iter().find(|d| d.trade_symbol == plan.good) {
+                                        o_summary!("      📊 Contract progress: {}/{} {} delivered", 
+                                                 delivery_req.units_fulfilled, 
+                                                 delivery_req.units_required, 
+                                                 plan.good);
+                                    }
+                                }
+                                Err(e) => {
+                                    o_error!("    ❌ Failed to deliver cargo: {}", e);
+                                    return Ok(false);
+                                }
+                            }
+                        }
+                        
+                        if total_delivered >= total_purchased {
+                            break;
+                        }
+                    }
+                }
+                
+                if total_delivered > 0 {
+                    o_summary!("    🎉 Contract delivery completed! Delivered {} {} units", total_delivered, plan.good);
+                } else {
+                    o_error!("    ⚠️ No cargo was delivered to contract");
+                }
+            }
+            
+            return Ok(true);
+        } else {
+            o_error!("    ❌ No units purchased");
+            return Ok(false);
+        }
+    }
+    
+    /// Extract system symbol from waypoint symbol (e.g., "X1-N5-F44" -> "X1-N5")
+    fn extract_system_from_waypoint(&self, waypoint_symbol: &str) -> Option<String> {
+        // Waypoint format is usually SYSTEM-WAYPOINT (e.g., X1-N5-F44)
+        // Find the last dash and take everything before it
+        let parts: Vec<&str> = waypoint_symbol.split('-').collect();
+        if parts.len() >= 3 {
+            // Take first two parts for system (e.g., "X1" and "N5")
+            Some(format!("{}-{}", parts[0], parts[1]))
+        } else {
+            None
+        }
+    }
+    
+    /// Distribute cargo requirements across multiple ships
+    fn distribute_cargo_across_fleet(&self, needed_units: i64, ships: &[Ship]) -> Vec<ShipAllocation> {
+        let mut allocations = Vec::new();
+        let mut remaining_units = needed_units as i32;
+        
+        // Sort ships by available cargo space (largest first)
+        let mut available_ships: Vec<_> = ships.iter()
+            .filter(|ship| ship.nav.status != "IN_TRANSIT")
+            .map(|ship| {
+                let available_space = ship.cargo.capacity - ship.cargo.units;
+                (ship, available_space)
+            })
+            .filter(|(_, space)| *space > 0)
+            .collect();
+            
+        available_ships.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by available space descending
+        
+        for (ship, available_space) in available_ships {
+            if remaining_units <= 0 {
+                break;
+            }
+            
+            let allocation_size = std::cmp::min(remaining_units, available_space);
+            if allocation_size > 0 {
+                allocations.push(ShipAllocation {
+                    ship_symbol: ship.symbol.clone(),
+                    units_to_purchase: allocation_size,
+                    available_cargo_space: available_space,
+                });
+                remaining_units -= allocation_size;
+            }
+        }
+        
+        allocations
     }
 }
 
-// Trading plan structure for future implementation
+// Multi-ship trading structures
+#[derive(Debug, Clone)]
+pub struct ShipAllocation {
+    pub ship_symbol: String,
+    pub units_to_purchase: i32,
+    pub available_cargo_space: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct MultiShipTradingPlan {
+    pub good: String,
+    pub total_needed: i64,
+    pub source_marketplace: String,
+    pub price_per_unit: i64,
+    pub total_cost: i64,
+    pub ship_allocations: Vec<ShipAllocation>,
+}
+
+// Enhanced trading plan structure with contract delivery integration
 #[derive(Debug, Clone)]
 pub struct TradingPlan {
     pub good: String,
@@ -947,4 +1321,6 @@ pub struct TradingPlan {
     pub price_per_unit: i64,
     pub total_cost: i64,
     pub assigned_ship: String,
+    pub contract_id: Option<String>,
+    pub delivery_destination: Option<String>,
 }

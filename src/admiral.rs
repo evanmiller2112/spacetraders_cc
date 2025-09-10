@@ -63,7 +63,7 @@ impl Admiral {
         let agent = self.client.get_agent().await?;
         
         // Level 0: Always show key status
-        o_summary!( "💰 Credits: {} | 🚢 Ships: {}", agent.credits, agent.ship_count);
+        o_summary!( "💰 Credits: {:>8} | 🚢 Fleet: {} ships", agent.credits, agent.ship_count);
         
         // Level 1: Show detailed agent info
         o_debug!( "📊 Agent Info:");
@@ -366,10 +366,20 @@ impl Admiral {
                       ship.symbol, ship_type, status, cargo_used, cargo_capacity, fuel_current, fuel_capacity);
         }
         
-        // Credits summary
+        // Credits summary with change tracking
         let final_agent = self.client.get_agent().await.unwrap_or_else(|_| agent.clone());
-        o_summary!("💰 Credits: {} | 🎯 Strategy: {} for {:?}", 
+        let credit_change = final_agent.credits as i64 - agent.credits as i64;
+        let change_indicator = if credit_change > 0 {
+            format!("📈 +{}", credit_change)
+        } else if credit_change < 0 {
+            format!("📉 {}", credit_change)
+        } else {
+            "➡️ No change".to_string()
+        };
+        
+        o_summary!("💰 Credits: {:>8} ({}) | 🎯 Strategy: {} for {:?}", 
                    final_agent.credits, 
+                   change_indicator,
                    if requires_marketplace_trading { "Marketplace trading" } else { "Mining" },
                    needed_materials);
         o_summary!(""); // Empty line for readability

@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use std::sync::OnceLock;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 use crate::{o_info, o_debug, o_trace};
+
+/// Global singleton broker instance
+static GLOBAL_BROKER: OnceLock<ApiRequestBroker> = OnceLock::new();
 
 /// Central API broker that manages ALL SpaceTraders API requests
 /// Ensures global rate limiting and prevents 429 errors
@@ -46,6 +50,17 @@ impl ApiRequestBroker {
         tokio::spawn(Self::broker_worker(request_receiver));
         
         Self { request_sender }
+    }
+    
+    /// Get or create the global singleton broker instance
+    pub fn global() -> &'static ApiRequestBroker {
+        GLOBAL_BROKER.get_or_init(|| {
+            // Using stderr to ensure this message is visible immediately
+            eprintln!("🌐🌐🌐 INITIALIZING GLOBAL SINGLETON API BROKER 🌐🌐🌐");
+            let broker = Self::new();
+            eprintln!("🌐🌐🌐 GLOBAL SINGLETON API BROKER CREATED SUCCESSFULLY 🌐🌐🌐");
+            broker
+        })
     }
     
     /// Submit an API request through the broker

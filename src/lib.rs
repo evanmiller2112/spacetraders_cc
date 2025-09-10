@@ -10,6 +10,7 @@ pub mod debug;
 pub mod config;
 pub mod verbosity;
 pub mod output_broker;
+pub mod goals;
 
 // Re-export commonly used types
 pub use models::{

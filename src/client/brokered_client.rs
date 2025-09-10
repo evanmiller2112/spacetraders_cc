@@ -11,7 +11,7 @@ pub struct BrokeredClient {
 impl BrokeredClient {
     pub fn new(token: String) -> Self {
         Self {
-            broker: ApiRequestBroker::new(),
+            broker: ApiRequestBroker::global().clone(),
             token,
         }
     }
