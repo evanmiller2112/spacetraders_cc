@@ -1009,12 +1009,39 @@ impl ShipActor {
     
     /// Execute selling cargo at a specific marketplace
     async fn execute_sell_cargo_at_marketplace(&mut self, marketplace: &str) -> Result<(), ShipActorError> {
-        // Navigate to marketplace first
+        // Get current ship status
         let current_ship = self.client.get_ship(&self.ship_symbol).await
             .map_err(|e| ShipActorError(format!("Failed to get ship status: {}", e)))?;
         
         if current_ship.nav.waypoint_symbol != marketplace {
             o_info!("🚀 {} navigating to marketplace {}", self.ship_symbol, marketplace);
+            
+            // Check if we have enough fuel for navigation - estimate fuel needed
+            let system_symbol = &current_ship.nav.system_symbol;
+            let fuel_needed = self.estimate_fuel_needed(&current_ship.nav.waypoint_symbol, marketplace, system_symbol).await;
+            
+            if current_ship.fuel.current < fuel_needed {
+                let fuel_deficit = fuel_needed - current_ship.fuel.current;
+                o_info!("⛽ {} needs {} more fuel (has {}, needs {})", 
+                       self.ship_symbol, fuel_deficit, current_ship.fuel.current, fuel_needed);
+                
+                // Try to find local fuel station and refuel
+                if let Err(e) = self.find_and_refuel_locally(&current_ship).await {
+                    // If we can't refuel, try to find a closer marketplace
+                    o_info!("⚠️ {} refuel failed: {}", self.ship_symbol, e);
+                    let closer_marketplace = self.find_closer_marketplace(system_symbol, current_ship.fuel.current).await
+                        .map_err(|_| ShipActorError(format!(
+                            "Cannot reach marketplace {} (need {} fuel, have {}) and no closer alternatives found", 
+                            marketplace, fuel_needed, current_ship.fuel.current
+                        )))?;
+                    
+                    o_info!("🔄 {} switching to closer marketplace: {}", self.ship_symbol, closer_marketplace);
+                    // Recursively call with the closer marketplace using Box::pin to handle async recursion
+                    return Box::pin(self.execute_sell_cargo_at_marketplace(&closer_marketplace)).await;
+                } else {
+                    o_info!("✅ {} refueled successfully", self.ship_symbol);
+                }
+            }
             
             // Ensure ship is in orbit before navigating
             if current_ship.nav.status == "DOCKED" {
@@ -1244,5 +1271,99 @@ impl ShipActor {
         
         o_info!("✅ {} transit completed", self.ship_symbol);
         Ok(())
+    }
+
+    /// Estimate fuel needed for navigation between waypoints
+    async fn estimate_fuel_needed(&self, from_waypoint: &str, to_waypoint: &str, _system_symbol: &str) -> i32 {
+        // Simple fuel estimation based on waypoint distance
+        // In a real implementation, this would calculate actual distance using system_symbol
+        if from_waypoint == to_waypoint {
+            return 0;
+        }
+        
+        // For now, use a conservative estimate - this could be enhanced with actual distance calculation
+        // Most navigation within a system shouldn't require more than 100-200 fuel
+        150 // Conservative estimate for same-system navigation
+    }
+
+    /// Find local fuel station and refuel
+    async fn find_and_refuel_locally(&mut self, current_ship: &crate::models::Ship) -> Result<(), ShipActorError> {
+        let system_symbol = &current_ship.nav.system_symbol;
+        
+        // Get waypoints in current system to find fuel stations
+        let waypoints = self.client.get_system_waypoints(system_symbol, None).await
+            .map_err(|e| ShipActorError(format!("Failed to get system waypoints: {}", e)))?;
+        
+        // Find nearby fuel stations (marketplaces typically have fuel)
+        let fuel_stations: Vec<_> = waypoints.iter()
+            .filter(|w| w.traits.iter().any(|t| t.symbol == "MARKETPLACE"))
+            .collect();
+        
+        if fuel_stations.is_empty() {
+            return Err(ShipActorError("No fuel stations found in system".to_string()));
+        }
+        
+        // Try the current waypoint first if it has a marketplace
+        let current_waypoint = &current_ship.nav.waypoint_symbol;
+        if fuel_stations.iter().any(|w| w.symbol == *current_waypoint) {
+            return self.refuel_at_current_location().await;
+        }
+        
+        // Find closest fuel station (for now, just pick the first one)
+        let closest_fuel_station = &fuel_stations[0];
+        o_info!("⛽ {} heading to fuel station: {}", self.ship_symbol, closest_fuel_station.symbol);
+        
+        // Navigate to fuel station and refuel
+        if current_ship.nav.status == "DOCKED" {
+            self.client.orbit_ship(&self.ship_symbol).await
+                .map_err(|e| ShipActorError(format!("Failed to orbit for fuel navigation: {}", e)))?;
+        }
+        
+        self.client.navigate_ship(&self.ship_symbol, &closest_fuel_station.symbol).await
+            .map_err(|e| ShipActorError(format!("Failed to navigate to fuel station: {}", e)))?;
+        
+        self.client.dock_ship(&self.ship_symbol).await
+            .map_err(|e| ShipActorError(format!("Failed to dock at fuel station: {}", e)))?;
+        
+        self.refuel_at_current_location().await
+    }
+
+    /// Refuel at current docked location
+    async fn refuel_at_current_location(&mut self) -> Result<(), ShipActorError> {
+        match self.client.refuel_ship(&self.ship_symbol).await {
+            Ok(refuel_data) => {
+                o_info!("⛽ {} refueled to {}/{} fuel", 
+                       self.ship_symbol, refuel_data.fuel.current, refuel_data.fuel.capacity);
+                Ok(())
+            }
+            Err(e) => Err(ShipActorError(format!("Refuel failed: {}", e)))
+        }
+    }
+
+    /// Find a closer marketplace that can be reached with available fuel
+    async fn find_closer_marketplace(&self, system_symbol: &str, available_fuel: i32) -> Result<String, ShipActorError> {
+        let waypoints = self.client.get_system_waypoints(system_symbol, None).await
+            .map_err(|e| ShipActorError(format!("Failed to get system waypoints: {}", e)))?;
+        
+        // Find all marketplaces in the system
+        let marketplaces: Vec<_> = waypoints.iter()
+            .filter(|w| w.traits.iter().any(|t| t.symbol == "MARKETPLACE"))
+            .collect();
+        
+        if marketplaces.is_empty() {
+            return Err(ShipActorError("No marketplaces found in system".to_string()));
+        }
+        
+        // For now, return the first marketplace we find
+        // In a real implementation, this would calculate distances and find the closest one
+        // that can be reached with available fuel
+        for marketplace in marketplaces {
+            let estimated_fuel = self.estimate_fuel_needed("current", &marketplace.symbol, system_symbol).await;
+            if estimated_fuel <= available_fuel {
+                return Ok(marketplace.symbol.clone());
+            }
+        }
+        
+        Err(ShipActorError("No reachable marketplaces found with available fuel".to_string()))
     }
 }
