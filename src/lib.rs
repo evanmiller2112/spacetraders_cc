@@ -7,6 +7,7 @@ pub mod operations;
 pub mod admiral;
 pub mod storage;
 pub mod debug;
+pub mod config;
 
 // Re-export commonly used types
 pub use models::{
@@ -18,6 +19,7 @@ pub use models::{
 
 pub use client::SpaceTradersClient;
 pub use admiral::Admiral;
+pub use config::{SpaceTradersConfig, ConfigManager};
 
 // Constants
 pub const API_BASE_URL: &str = "https://api.spacetraders.io/v2";

@@ -5,8 +5,10 @@ use crate::operations::ship_actor::*;
 use crate::operations::ship_prioritizer::*;
 use crate::operations::task_planner::*;
 use crate::storage::{ShipStateStore, SurveyCache};
+use crate::config::SpaceTradersConfig;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration, Instant};
+use std::time::SystemTime;
 use std::collections::HashMap;
 
 pub struct FleetCoordinator {
@@ -20,15 +22,18 @@ pub struct FleetCoordinator {
     ship_cache: ShipStateStore,
     survey_cache: SurveyCache,
     task_planner: TaskPlanner,
+    cached_contracts: Option<Vec<Contract>>,
+    contract_cache_timestamp: Option<SystemTime>,
+    config: SpaceTradersConfig,
 }
 
 impl FleetCoordinator {
-    pub fn new(client: SpaceTradersClient) -> Self {
+    pub fn new(client: SpaceTradersClient, config: SpaceTradersConfig) -> Self {
         let (status_sender, status_receiver) = mpsc::unbounded_channel();
         let prioritizer = ShipPrioritizer::new(client.clone());
-        let ship_cache = ShipStateStore::new("storage/ship_states.json", 5); // 5 minute staleness threshold
-        let survey_cache = SurveyCache::new("storage/survey_cache.json", 12); // 12 hour cache duration
-        let task_planner = TaskPlanner::new(client.clone());
+        let ship_cache = ShipStateStore::new("storage/ship_states.json", config.caching.ship_state_staleness_minutes);
+        let survey_cache = SurveyCache::new("storage/survey_cache.json", config.caching.survey_cache_hours);
+        let task_planner = TaskPlanner::new(client.clone(), config.clone());
         
         Self {
             client,
@@ -41,7 +46,15 @@ impl FleetCoordinator {
             ship_cache,
             survey_cache,
             task_planner,
+            cached_contracts: None,
+            contract_cache_timestamp: None,
+            config,
         }
+    }
+
+    /// Update configuration for hot-reloading
+    pub fn update_config(&mut self, new_config: SpaceTradersConfig) {
+        self.config = new_config;
     }
 
     pub async fn initialize_fleet(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -86,6 +99,7 @@ impl FleetCoordinator {
             action_receiver,
             status_sender_clone,
             client_clone,
+            self.config.clone(),
         );
         
         // Initialize ship state
@@ -111,7 +125,7 @@ impl FleetCoordinator {
     }
 
     /// Print comprehensive fleet status at start/end of cycles
-    async fn print_fleet_status(&self, title: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn print_fleet_status(&mut self, title: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("\n═══════════════════════════════════════");
         println!("🚢 {} FLEET STATUS", title);
         println!("═══════════════════════════════════════");
@@ -462,6 +476,7 @@ impl FleetCoordinator {
         // Find suitable mining location using cached waypoints
         let system_symbol = ship.nav.waypoint_symbol.split('-').take(2).collect::<Vec<&str>>().join("-");
         let client_for_nav = self.client.clone(); // Clone before mutable borrow
+        let config_clone = self.config.clone(); // Clone config for navigation planner
         let waypoints = self.get_system_waypoints_cached(&system_symbol).await?;
         
         // Determine what deposit type we need based on the materials
@@ -496,7 +511,7 @@ impl FleetCoordinator {
         
         for asteroid in suitable_asteroids {
             // Create navigation planner for fuel checks
-            let nav_planner = crate::operations::NavigationPlanner::new(client_for_nav.clone());
+            let nav_planner = crate::operations::NavigationPlanner::new(client_for_nav.clone(), config_clone.clone());
             
             match nav_planner.can_navigate_safely(ship, &asteroid.symbol).await {
                 Ok(safety_check) => {
@@ -756,10 +771,60 @@ impl FleetCoordinator {
     }
 
     /// Get contract status with smart caching - use cached data if fresh, otherwise fetch from API
-    async fn get_contract_status(&self) -> Result<Vec<Contract>, Box<dyn std::error::Error>> {
-        // For now, always fetch fresh contract data as contracts change frequently during operations
-        // TODO: Implement contract caching with shorter refresh intervals (e.g., 30 seconds)
-        self.client.get_contracts().await
+    async fn get_contract_status(&mut self) -> Result<Vec<Contract>, Box<dyn std::error::Error>> {
+        let cache_duration_secs = self.config.contracts.cache_duration_seconds;
+        
+        // Check if we have fresh cached data
+        if let (Some(cached_contracts), Some(timestamp)) = (&self.cached_contracts, self.contract_cache_timestamp) {
+            if let Ok(elapsed) = timestamp.elapsed() {
+                if elapsed.as_secs() < cache_duration_secs {
+                    println!("📋 Using cached contract data ({:.1}s old)", elapsed.as_secs_f32());
+                    return Ok(cached_contracts.clone());
+                }
+            }
+        }
+        
+        // Try to fetch fresh data
+        match self.client.get_contracts().await {
+            Ok(contracts) => {
+                println!("📋 Fetched fresh contract data from API");
+                // Update cache
+                self.cached_contracts = Some(contracts.clone());
+                self.contract_cache_timestamp = Some(SystemTime::now());
+                Ok(contracts)
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                if error_msg.contains("429") || error_msg.contains("Too Many Requests") {
+                    // Rate limited - use cached data if available
+                    if let Some(cached_contracts) = &self.cached_contracts {
+                        let age = self.contract_cache_timestamp
+                            .and_then(|ts| ts.elapsed().ok())
+                            .map(|d| format!("{:.1}s", d.as_secs_f32()))
+                            .unwrap_or_else(|| "unknown age".to_string());
+                            
+                        println!("⚠️ Rate limited (429) - using cached contract data ({})", age);
+                        return Ok(cached_contracts.clone());
+                    } else {
+                        println!("❌ Rate limited and no cached contract data available");
+                        return Err(format!("Rate limited and no cached data: {}", e).into());
+                    }
+                } else {
+                    // Other error - still try cached data as fallback
+                    if let Some(cached_contracts) = &self.cached_contracts {
+                        let age = self.contract_cache_timestamp
+                            .and_then(|ts| ts.elapsed().ok())
+                            .map(|d| format!("{:.1}s", d.as_secs_f32()))
+                            .unwrap_or_else(|| "unknown age".to_string());
+                            
+                        println!("⚠️ API error - using cached contract data ({}): {}", age, e);
+                        return Ok(cached_contracts.clone());
+                    }
+                }
+                
+                Err(e)
+            }
+        }
     }
 
     /// Create a visual progress bar for contract completion
@@ -784,16 +849,16 @@ impl FleetCoordinator {
         if let Some(ship_state) = self.ship_states.get(&ship.symbol) {
             if let Some(plan) = &ship_state.current_plan {
                 // Need refuel if insufficient fuel for current task (with 20% safety buffer)
-                let fuel_needed_with_buffer = (plan.estimated_fuel_required as f64 * 1.2) as i32;
+                let fuel_needed_with_buffer = (plan.estimated_fuel_required as f64 * self.config.fuel.fuel_buffer_multiplier) as i32;
                 if ship.fuel.current < fuel_needed_with_buffer {
                     return true;
                 }
             }
         }
         
-        // Default: Need refuel if less than 20% fuel
+        // Default: Need refuel if below configured threshold
         let fuel_percentage = ship.fuel.current as f64 / ship.fuel.capacity as f64;
-        fuel_percentage < 0.2
+        fuel_percentage < self.config.fuel.refuel_threshold
     }
     
     /// More proactive fuel check specifically for mining operations
@@ -804,12 +869,12 @@ impl FleetCoordinator {
             return false;
         }
         
-        // Refuel if less than 50% fuel before mining - this ensures ships can:
+        // Refuel if below configured threshold for mining operations - this ensures ships can:
         // 1. Travel to mining asteroids
         // 2. Travel back to marketplaces to sell cargo  
         // 3. Handle multiple mining cycles without constantly running low
         let fuel_percentage = ship.fuel.current as f64 / ship.fuel.capacity as f64;
-        fuel_percentage < 0.5
+        fuel_percentage < self.config.fuel.mining_fuel_threshold
     }
 
     fn is_cargo_full(&self, ship: &Ship) -> bool {
@@ -837,9 +902,10 @@ impl FleetCoordinator {
         match self.find_fuel_station(system_symbol, ship_x, ship_y, &ship.symbol).await? {
             Some(station) => Ok(station),
             None => {
-                // Fallback to headquarters if no fuel stations found
-                println!("⚠️ No fuel stations found in {}, using headquarters", system_symbol);
-                Ok("X1-DC46-A1".to_string())
+                // Fallback to agent's headquarters if no fuel stations found
+                println!("⚠️ No fuel stations found in {}, using agent headquarters as fallback", system_symbol);
+                let agent = self.client.get_agent().await?;
+                Ok(agent.headquarters)
             }
         }
     }
@@ -1227,7 +1293,7 @@ impl FleetCoordinator {
         // Check if we should buy another mining ship
         let should_expand = self.should_expand_fleet(&agent, &current_ships, contract).await;
         
-        if should_expand && agent.credits >= 150000 { // Minimum for a decent mining ship
+        if should_expand && agent.credits >= self.config.fleet.min_credits_for_ship_purchase {
             println!("🎯 Fleet expansion recommended - searching for shipyards...");
             
             // Try to find and purchase a ship
@@ -1254,7 +1320,7 @@ impl FleetCoordinator {
                 }
             }
         } else if should_expand {
-            let needed = 150000 - agent.credits;
+            let needed = self.config.fleet.min_credits_for_ship_purchase - agent.credits;
             println!("💸 Want to expand fleet but need {} more credits", needed);
         }
         
@@ -1274,25 +1340,25 @@ impl FleetCoordinator {
         let total_contract_units: i32 = contract.terms.deliver.iter().map(|d| d.units_required).sum();
         let contract_value = contract.terms.payment.on_fulfilled;
         
-        // Expansion logic (optimized for current situation)
-        let has_credits = agent.credits >= 150000; // Lower threshold to enable expansion sooner
-        let contract_is_large = total_contract_units >= 30 || contract_value >= 10000; // More accessible thresholds
-        let not_too_many_ships = mining_ships < 4; // Cap at 4 mining ships for now
-        let profitable = contract_value > 10000; // Lower profit threshold for smaller contracts
+        // Expansion logic (using configurable thresholds)
+        let has_credits = agent.credits >= self.config.fleet.min_credits_for_ship_purchase;
+        let contract_is_large = total_contract_units >= self.config.contracts.large_contract_units || contract_value >= self.config.credits.large_contract_threshold;
+        let not_too_many_ships = mining_ships < self.config.fleet.max_mining_ships;
+        let profitable = contract_value > self.config.credits.min_profitable_contract;
         
         if has_credits && contract_is_large && not_too_many_ships && profitable {
             println!("✅ Fleet expansion criteria met:");
-            println!("   💰 Credits: {} >= 150,000", agent.credits);
+            println!("   💰 Credits: {} >= {}", agent.credits, self.config.fleet.min_credits_for_ship_purchase);
             println!("   📦 Contract size: {} units", total_contract_units);
             println!("   💎 Contract value: {} credits", contract_value);
-            println!("   🚢 Current miners: {}/4", mining_ships);
+            println!("   🚢 Current miners: {}/{}", mining_ships, self.config.fleet.max_mining_ships);
             true
         } else {
             println!("❌ Fleet expansion not recommended:");
-            if !has_credits { println!("   💸 Need more credits ({} < 150,000)", agent.credits); }
+            if !has_credits { println!("   💸 Need more credits ({} < {})", agent.credits, self.config.fleet.min_credits_for_ship_purchase); }
             if !contract_is_large { println!("   📦 Contract too small ({} units, {} value)", total_contract_units, contract_value); }
             if !not_too_many_ships { println!("   🚢 Already have enough miners ({})", mining_ships); }
-            if !profitable { println!("   💎 Contract not profitable enough ({} < 15,000)", contract_value); }
+            if !profitable { println!("   💎 Contract not profitable enough ({} < {})", contract_value, self.config.credits.min_profitable_contract); }
             false
         }
     }

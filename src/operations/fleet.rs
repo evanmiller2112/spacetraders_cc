@@ -99,15 +99,33 @@ impl<'a> FleetOperations<'a> {
                         Err(e) => {
                             eprintln!("    ⚠️ Could not refuel {}: {}", ship.symbol, e);
                             println!("    💡 Current location may not offer refueling services");
-                            println!("    🚀 Attempting to navigate to fuel station X1-SG75-B6...");
                             
-                            // Try to go to the fuel station first
-                            match self.ship_ops.orbit(&ship.symbol).await {
-                                Ok(_) => {},
-                                Err(e) => println!("    ⚠️ Could not orbit: {}", e),
-                            }
+                            // Try to find a fuel station dynamically
+                            let system_symbol = &ship.nav.system_symbol;
+                            let waypoints = match self.client.get_system_waypoints(system_symbol, None).await {
+                                Ok(waypoints) => waypoints,
+                                Err(e) => {
+                                    println!("    ⚠️ Could not get waypoints to find fuel station: {}", e);
+                                    continue;
+                                }
+                            };
                             
-                            match self.ship_ops.navigate(&ship.symbol, "X1-SG75-B6").await {
+                            // Find nearest marketplace for refueling
+                            let fuel_station = waypoints.iter()
+                                .find(|w| w.traits.iter().any(|t| t.symbol == "MARKETPLACE"))
+                                .map(|w| w.symbol.clone());
+                                
+                            match fuel_station {
+                                Some(station) => {
+                                    println!("    🚀 Attempting to navigate to fuel station {}...", station);
+                                    
+                                    // Try to go to the fuel station first
+                                    match self.ship_ops.orbit(&ship.symbol).await {
+                                        Ok(_) => {},
+                                        Err(e) => println!("    ⚠️ Could not orbit: {}", e),
+                                    }
+                                    
+                                    match self.ship_ops.navigate(&ship.symbol, &station).await {
                                 Ok(_) => {
                                     println!("    ✅ Navigating to fuel station");
                                     // Wait a bit for arrival
@@ -123,6 +141,12 @@ impl<'a> FleetOperations<'a> {
                                 }
                                 Err(e) => {
                                     println!("    ❌ Could not navigate to fuel station: {}", e);
+                                    println!("    💡 Continuing with current fuel - may cause navigation issues");
+                                }
+                            }
+                                }
+                                None => {
+                                    println!("    ⚠️ No fuel stations found in {}", system_symbol);
                                     println!("    💡 Continuing with current fuel - may cause navigation issues");
                                 }
                             }

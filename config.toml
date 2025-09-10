@@ -1,0 +1,60 @@
+# SpaceTraders Autonomous Agent Configuration
+# This file contains all configurable thresholds and parameters
+# Edit these values to customize bot behavior
+# Changes are automatically reloaded while the bot is running
+
+[fleet]
+# Minimum credits required to consider buying a new ship
+min_credits_for_ship_purchase = 50000
+# Maximum number of mining ships to maintain  
+max_mining_ships = 999
+# Credits threshold for fleet expansion consideration
+fleet_expansion_threshold = 70000
+
+[fuel]
+# Fuel percentage below which ships should refuel (0.0 to 1.0)
+refuel_threshold = 0.2
+# Fuel percentage for mining ships to maintain before operations (0.0 to 1.0)  
+mining_fuel_threshold = 0.5
+# Safety margin for fuel calculations (extra fuel units)
+fuel_safety_margin = 10
+# Fuel buffer multiplier for route planning (1.0 = no buffer, 1.2 = 20% buffer)
+fuel_buffer_multiplier = 1.2
+
+[credits]
+# Minimum credits to keep in reserve for emergencies
+min_reserve_credits = 20000
+# Credits threshold for large contract consideration
+large_contract_threshold = 10000
+# Minimum contract value to consider profitable
+min_profitable_contract = 10000
+
+[contracts]
+# Minimum contract units to be considered "large"
+large_contract_units = 30
+# Contract cache duration in seconds
+cache_duration_seconds = 30
+
+[timing]
+# Main cycle delay in seconds
+main_cycle_delay_seconds = 30
+# Retry delay after errors in seconds  
+error_retry_delay_seconds = 60
+# Config hot-reload check interval in seconds
+config_reload_interval_seconds = 30
+# Fleet coordination timeout in seconds (max time for autonomous operations)
+fleet_coordination_timeout_seconds = 300
+
+[navigation]
+# Maximum distance to consider for route planning
+max_route_distance = 100.0
+# Minimum API retry delay in seconds
+min_retry_delay_seconds = 0.1
+
+[caching]
+# Ship state cache staleness threshold in minutes
+ship_state_staleness_minutes = 5
+# Survey cache duration in hours
+survey_cache_hours = 12
+# Survey expiration time in minutes
+survey_expiration_minutes = 30

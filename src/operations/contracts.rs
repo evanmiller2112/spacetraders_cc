@@ -116,6 +116,50 @@ impl<'a> ContractOperations<'a> {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         println!("📦 Starting autonomous contract delivery operations...");
         
+        // First, check if contract is already 100% complete and just needs fulfillment
+        println!("🔍 Checking if contract is already ready for fulfillment...");
+        let fresh_contract = match self.client.get_contracts().await {
+            Ok(contracts) => contracts.into_iter().find(|c| c.id == contract.id),
+            Err(e) => {
+                println!("  ⚠️ Could not fetch contract status: {}", e);
+                None
+            }
+        };
+
+        if let Some(fresh_contract) = &fresh_contract {
+            let total_units_fulfilled: i32 = fresh_contract.terms.deliver.iter()
+                .map(|d| d.units_fulfilled)
+                .sum();
+            let total_units_required: i32 = fresh_contract.terms.deliver.iter()
+                .map(|d| d.units_required)
+                .sum();
+            
+            println!("  📊 Contract status: {}/{} units fulfilled ({}%)", 
+                    total_units_fulfilled, total_units_required,
+                    (total_units_fulfilled * 100) / total_units_required.max(1));
+            
+            if total_units_fulfilled >= total_units_required {
+                println!("🎉 CONTRACT ALREADY 100% COMPLETE! Executing fulfillment...");
+                
+                match self.fulfill_contract(&contract.id).await {
+                    Ok(fulfill_data) => {
+                        println!("🎆 CONTRACT FULFILLED SUCCESSFULLY!");
+                        println!("  💰 Payment received: {} credits", contract.terms.payment.on_fulfilled);
+                        println!("  📊 New agent credits: {}", fulfill_data.agent.credits);
+                        println!("  🏆 Contract ID: {} COMPLETED", contract.id);
+                        
+                        return Ok(true);
+                    }
+                    Err(e) => {
+                        println!("❌ Contract fulfillment failed: {}", e);
+                        // Continue with delivery operations in case we need to deliver more
+                    }
+                }
+            } else {
+                println!("  📈 Contract needs more deliveries before fulfillment");
+            }
+        }
+        
         // Check if any ships have enough contract materials for delivery
         let ships_for_delivery = self.client.get_ships().await?;
         
@@ -274,8 +318,41 @@ impl<'a> ContractOperations<'a> {
         // Check if contract can be fulfilled
         println!("\n📋 Checking contract fulfillment status...");
         
-        if total_delivered >= required_materials {
-            println!("🎉 ALL MATERIALS DELIVERED! Fulfilling contract...");
+        // Get fresh contract status to check actual fulfillment progress
+        let fresh_contract = match self.client.get_contracts().await {
+            Ok(contracts) => contracts.into_iter().find(|c| c.id == contract.id),
+            Err(e) => {
+                println!("  ⚠️ Could not fetch contract status: {}", e);
+                None
+            }
+        };
+
+        let contract_ready_for_fulfillment = if let Some(fresh_contract) = fresh_contract {
+            let total_units_fulfilled: i32 = fresh_contract.terms.deliver.iter()
+                .map(|d| d.units_fulfilled)
+                .sum();
+            let total_units_required: i32 = fresh_contract.terms.deliver.iter()
+                .map(|d| d.units_required)
+                .sum();
+            
+            println!("  📊 Contract status: {}/{} units fulfilled", total_units_fulfilled, total_units_required);
+            
+            if total_units_fulfilled >= total_units_required {
+                println!("  ✅ Contract is 100% complete and ready for fulfillment!");
+                true
+            } else {
+                println!("  📈 Contract progress: {}% complete", 
+                        (total_units_fulfilled * 100) / total_units_required.max(1));
+                false
+            }
+        } else {
+            // Fallback to old logic if we can't get fresh contract data
+            println!("  ⚠️ Using fallback logic - delivered {} units this session", total_delivered);
+            total_delivered >= required_materials
+        };
+        
+        if contract_ready_for_fulfillment {
+            println!("🎉 CONTRACT READY FOR FULFILLMENT! Executing fulfillment...");
             
             match self.fulfill_contract(&contract.id).await {
                 Ok(fulfill_data) => {

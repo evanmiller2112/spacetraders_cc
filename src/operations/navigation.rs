@@ -3,14 +3,21 @@
 
 use crate::models::*;
 use crate::client::SpaceTradersClient;
+use crate::config::SpaceTradersConfig;
 
 pub struct NavigationPlanner {
     client: SpaceTradersClient,
+    config: SpaceTradersConfig,
 }
 
 impl NavigationPlanner {
-    pub fn new(client: SpaceTradersClient) -> Self {
-        Self { client }
+    pub fn new(client: SpaceTradersClient, config: SpaceTradersConfig) -> Self {
+        Self { client, config }
+    }
+
+    /// Update configuration for hot-reloading
+    pub fn update_config(&mut self, new_config: SpaceTradersConfig) {
+        self.config = new_config;
     }
     
     /// Calculate euclidean distance between two waypoints
@@ -118,7 +125,7 @@ impl NavigationPlanner {
         for (marketplace, distance_to_fuel) in &marketplaces {
             let fuel_needed_to_station = Self::estimate_fuel_cost(*distance_to_fuel);
             
-            if available_fuel >= fuel_needed_to_station + 10 { // 10 fuel safety margin
+            if available_fuel >= fuel_needed_to_station + self.config.fuel.fuel_safety_margin {
                 return Ok(NavigationSafetyCheck {
                     is_safe: false, // Not safe for direct navigation
                     fuel_needed: fuel_needed_to_dest, // Still report the direct fuel needed

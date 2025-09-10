@@ -1,21 +1,25 @@
 // Admiral module - High-level autonomous game loop orchestration
 use crate::client::SpaceTradersClient;
+use crate::config::ConfigManager;
 use std::fs;
 
 pub struct Admiral {
     pub client: SpaceTradersClient,
+    config_manager: ConfigManager,
     debug_mode: bool,
     full_debug: bool,
 }
 
 impl Admiral {
-    pub fn new(token: String) -> Self {
+    pub fn new(token: String) -> Result<Self, Box<dyn std::error::Error>> {
         let client = SpaceTradersClient::new(token);
-        Self { 
+        let config_manager = ConfigManager::new("config.toml")?;
+        Ok(Self { 
             client,
+            config_manager,
             debug_mode: false,
             full_debug: false,
-        }
+        })
     }
     
     pub fn set_debug_mode(&mut self, debug: bool) {
@@ -80,21 +84,56 @@ impl Admiral {
         // Step 3: Advanced Fleet Coordination
         println!("\n═══ STEP 3: Advanced Fleet Coordination ═══");
         
-        // Create and initialize fleet coordinator
-        let mut fleet_coordinator = FleetCoordinator::new(self.client.clone());
-        fleet_coordinator.initialize_fleet().await?;
+        // First, check if contract is already complete before starting fleet operations
+        println!("🔍 Pre-flight check: Is contract already complete?");
+        let contracts_for_check = self.client.get_contracts().await?;
+        let current_contract = contracts_for_check.iter().find(|c| c.id == active_contract.id);
         
-        println!("🎯 Starting autonomous fleet operations with per-ship action queues");
+        let contract_already_complete = if let Some(contract) = current_contract {
+            let total_units_fulfilled: i32 = contract.terms.deliver.iter()
+                .map(|d| d.units_fulfilled)
+                .sum();
+            let total_units_required: i32 = contract.terms.deliver.iter()
+                .map(|d| d.units_required)
+                .sum();
+            
+            let completion_percentage = (total_units_fulfilled * 100) / total_units_required.max(1);
+            println!("  📊 Contract status: {}/{} units fulfilled ({}%)", 
+                    total_units_fulfilled, total_units_required, completion_percentage);
+            
+            if total_units_fulfilled >= total_units_required {
+                println!("  🎉 Contract is already 100% complete! Skipping fleet coordination.");
+                true
+            } else {
+                println!("  📈 Contract needs more work - proceeding with fleet coordination");
+                false
+            }
+        } else {
+            println!("  ⚠️ Could not verify contract status - proceeding with fleet coordination");
+            false
+        };
         
-        // Run autonomous operations for limited cycles (instead of infinite loop)
-        let coordination_result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(300), // 5 minutes max per cycle
-            fleet_coordinator.run_autonomous_operations(&active_contract)
-        ).await;
+        // Use config manager for hot-reloading configuration
+        let config = self.config_manager.config();
         
-        match coordination_result {
-            Ok(_) => println!("✅ Fleet coordination cycle completed successfully"),
-            Err(_) => println!("⏰ Fleet coordination cycle timed out - continuing to next step"),
+        if !contract_already_complete {
+            let mut fleet_coordinator = FleetCoordinator::new(self.client.clone(), config.clone());
+            fleet_coordinator.initialize_fleet().await?;
+            
+            println!("🎯 Starting autonomous fleet operations with per-ship action queues");
+            
+            // Run autonomous operations for limited cycles (instead of infinite loop)
+            let coordination_result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(config.timing.fleet_coordination_timeout_seconds as u64),
+                fleet_coordinator.run_autonomous_operations(&active_contract)
+            ).await;
+            
+            match coordination_result {
+                Ok(_) => println!("✅ Fleet coordination cycle completed successfully"),
+                Err(_) => println!("⏰ Fleet coordination cycle timed out - continuing to next step"),
+            }
+        } else {
+            println!("⚡ Skipping fleet coordination - contract ready for fulfillment");
         }
         
         // Get contract materials for remaining operations
@@ -151,7 +190,7 @@ impl Admiral {
         println!("💰 Current credits: {}", updated_agent.credits);
         
         // Basic expansion logic - could be enhanced
-        if updated_agent.credits > 200000 && analysis.mining_ships < 5 {
+        if updated_agent.credits > config.fleet.min_credits_for_ship_purchase && analysis.mining_ships < config.fleet.max_mining_ships as usize {
             println!("💡 Fleet expansion recommended:");
             println!("  Sufficient credits for new mining ship");
             println!("  Current mining capacity: {} ships", analysis.mining_ships);
@@ -471,11 +510,12 @@ impl Admiral {
                     }
                     Err(e) => {
                         eprintln!("❌ Cycle #{} failed: {}", cycle_count, e);
-                        eprintln!("⏳ Waiting 60 seconds before retry...");
+                        let config = self.config_manager.config();
+                        eprintln!("⏳ Waiting {} seconds before retry...", config.timing.error_retry_delay_seconds);
                         
                         // Check for Ctrl+C during error recovery delay
                         tokio::select! {
-                            _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {},
+                            _ = tokio::time::sleep(tokio::time::Duration::from_secs(config.timing.error_retry_delay_seconds as u64)) => {},
                             _ = tokio::signal::ctrl_c() => {
                                 println!("\n⚠️  Ctrl+C received during error recovery. Shutting down...");
                                 return Ok::<(), Box<dyn std::error::Error>>(());
@@ -485,10 +525,11 @@ impl Admiral {
                 }
                 
                 // Brief pause between cycles with Ctrl+C handling
-                println!("⏳ Cycle complete. Waiting 30 seconds before next cycle...");
+                let config = self.config_manager.config();
+                println!("⏳ Cycle complete. Waiting {} seconds before next cycle...", config.timing.main_cycle_delay_seconds);
                 
                 tokio::select! {
-                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {},
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(config.timing.main_cycle_delay_seconds as u64)) => {},
                     _ = tokio::signal::ctrl_c() => {
                         println!("\n⚠️  Ctrl+C received. Shutting down gracefully...");
                         return Ok::<(), Box<dyn std::error::Error>>(());

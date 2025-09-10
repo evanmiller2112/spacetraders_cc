@@ -3,6 +3,7 @@ use crate::client::SpaceTradersClient;
 use crate::models::*;
 use crate::operations::NavigationPlanner;
 use crate::storage::CooldownStore;
+use crate::config::SpaceTradersConfig;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep};
 use chrono;
@@ -107,10 +108,11 @@ impl ShipActor {
         action_receiver: mpsc::UnboundedReceiver<ShipAction>,
         status_sender: mpsc::UnboundedSender<(String, ShipState)>,
         client: SpaceTradersClient,
+        config: SpaceTradersConfig,
     ) -> Self {        
         let storage_path = format!("storage/cooldowns_{}.json", ship_symbol);
         let cooldown_store = CooldownStore::new(&storage_path);
-        let navigation_planner = NavigationPlanner::new(client.clone());
+        let navigation_planner = NavigationPlanner::new(client.clone(), config.clone());
         
         Self {
             ship_symbol,
@@ -579,8 +581,29 @@ impl ShipActor {
     }
 
     async fn send_status(&self, status: ShipActorStatus) {
-        // Get current ship state - this is a simplified version
-        // In a real implementation, we'd fetch the current ship data
+        // Fetch current ship data to get accurate fuel, cargo, and location info
+        match self.client.get_ship(&self.ship_symbol).await {
+            Ok(ship) => {
+                let ship_state = ShipState {
+                    ship,
+                    cooldown_until: self.cooldown_until,
+                    current_action: None, // TODO: Track current action properly
+                    current_plan: None,   // TODO: Track current plan properly
+                    status,
+                };
+                
+                if let Err(_) = self.status_sender.send((self.ship_symbol.clone(), ship_state)) {
+                    // Channel closed - coordinator is shutting down
+                }
+                return;
+            }
+            Err(e) => {
+                // If we can't get ship data, send error status with minimal dummy data
+                println!("⚠️ {} failed to get ship data for status update: {}", self.ship_symbol, e);
+            }
+        }
+        
+        // Fallback: create dummy ship data (only used when API fails)
         let ship_state = ShipState {
             ship: Ship {
                 symbol: self.ship_symbol.clone(),
@@ -682,7 +705,7 @@ impl ShipActor {
             cooldown_until: self.cooldown_until,
             current_action: None,
             current_plan: None,
-            status,
+            status: ShipActorStatus::Error("Failed to get current ship data".to_string()),
         };
         
         if let Err(_) = self.status_sender.send((self.ship_symbol.clone(), ship_state)) {

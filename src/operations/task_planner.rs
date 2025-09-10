@@ -3,6 +3,7 @@ use crate::client::SpaceTradersClient;
 use crate::models::*;
 use crate::operations::ship_actor::ShipAction;
 use crate::operations::navigation::NavigationPlanner;
+use crate::config::SpaceTradersConfig;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -37,14 +38,21 @@ pub enum TaskStepType {
 pub struct TaskPlanner {
     client: SpaceTradersClient,
     waypoint_cache: HashMap<String, Vec<Waypoint>>,
+    config: SpaceTradersConfig,
 }
 
 impl TaskPlanner {
-    pub fn new(client: SpaceTradersClient) -> Self {
+    pub fn new(client: SpaceTradersClient, config: SpaceTradersConfig) -> Self {
         Self {
             client,
             waypoint_cache: HashMap::new(),
+            config,
         }
+    }
+
+    /// Update configuration for hot-reloading
+    pub fn update_config(&mut self, new_config: SpaceTradersConfig) {
+        self.config = new_config;
     }
 
     /// Create a detailed execution plan for a ship action
@@ -323,7 +331,7 @@ impl TaskPlanner {
             let fuel_needed_to_station = NavigationPlanner::estimate_fuel_cost(distance_to_station);
 
             // Can we reach this fuel station with current fuel?
-            if available_fuel >= fuel_needed_to_station + 10 { // 10 fuel safety margin
+            if available_fuel >= fuel_needed_to_station + self.config.fuel.fuel_safety_margin {
                 // Is this station closer to our destination than our current best?
                 let distance_station_to_dest = NavigationPlanner::calculate_distance_waypoints(station, dest_waypoint);
                 
