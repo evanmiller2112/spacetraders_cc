@@ -1,6 +1,7 @@
 // Persistent scan and survey data storage system
 use std::collections::HashMap;
 use std::fs;
+use crate::{o_debug};
 use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -40,8 +41,8 @@ impl SurveyCache {
         
         // Load existing cache
         if let Err(e) = cache.load_from_disk() {
-            println!("⚠️ Failed to load survey cache: {}", e);
-            println!("💾 Starting with empty survey cache");
+            o_debug!("⚠️ Failed to load survey cache: {}", e);
+            o_debug!("💾 Starting with empty survey cache");
         }
         
         cache
@@ -57,7 +58,7 @@ impl SurveyCache {
         
         self.waypoint_cache.insert(system_symbol.to_string(), cached_data);
         
-        println!("💾 Cached {} waypoints for system {}", 
+        o_debug!("💾 Cached {} waypoints for system {}", 
                 self.waypoint_cache[system_symbol].waypoints.len(), system_symbol);
         
         self.save_to_disk()?;
@@ -69,10 +70,10 @@ impl SurveyCache {
             let age_hours = Utc::now().signed_duration_since(cached.last_scanned).num_hours();
             
             if age_hours <= self.cache_duration_hours {
-                println!("📋 Using cached waypoints for {} (age: {}h)", system_symbol, age_hours);
+                o_debug!("📋 Using cached waypoints for {} (age: {}h)", system_symbol, age_hours);
                 return Some(&cached.waypoints);
             } else {
-                println!("⏰ Waypoints for {} are stale (age: {}h > {}h)", 
+                o_debug!("⏰ Waypoints for {} are stale (age: {}h > {}h)", 
                         system_symbol, age_hours, self.cache_duration_hours);
             }
         }
@@ -97,7 +98,7 @@ impl SurveyCache {
         
         self.survey_cache.insert(waypoint_symbol.to_string(), cached_data);
         
-        println!("💾 Cached {} surveys for waypoint {} (expires: {})", 
+        o_debug!("💾 Cached {} surveys for waypoint {} (expires: {})", 
                 survey_data.surveys.len(), waypoint_symbol, expires_at.format("%H:%M:%S UTC"));
         
         self.save_to_disk()?;
@@ -110,10 +111,10 @@ impl SurveyCache {
             
             if now < cached.expires_at {
                 let remaining_minutes = cached.expires_at.signed_duration_since(now).num_minutes();
-                println!("📋 Using cached surveys for {} ({}min remaining)", waypoint_symbol, remaining_minutes);
+                o_debug!("📋 Using cached surveys for {} ({}min remaining)", waypoint_symbol, remaining_minutes);
                 return Some(&cached.surveys);
             } else {
-                println!("⏰ Surveys for {} have expired", waypoint_symbol);
+                o_debug!("⏰ Surveys for {} have expired", waypoint_symbol);
             }
         }
         None
@@ -143,7 +144,7 @@ impl SurveyCache {
         let removed_waypoints = initial_waypoints - self.waypoint_cache.len();
         
         if removed_surveys > 0 || removed_waypoints > 0 {
-            println!("🧹 Cleaned up cache: {} surveys, {} waypoints expired", 
+            o_debug!("🧹 Cleaned up cache: {} surveys, {} waypoints expired", 
                     removed_surveys, removed_waypoints);
             self.save_to_disk()?;
         }
@@ -152,16 +153,16 @@ impl SurveyCache {
     }
     
     pub fn print_cache_status(&self) {
-        println!("💾 Survey Cache Status:");
-        println!("   📊 Cached systems: {}", self.waypoint_cache.len());
-        println!("   🔍 Active surveys: {}", self.survey_cache.len());
-        println!("   ⏱️  Cache duration: {}h", self.cache_duration_hours);
+        o_debug!("💾 Survey Cache Status:");
+        o_debug!("   📊 Cached systems: {}", self.waypoint_cache.len());
+        o_debug!("   🔍 Active surveys: {}", self.survey_cache.len());
+        o_debug!("   ⏱️  Cache duration: {}h", self.cache_duration_hours);
         
         // Show system details
         for (system, cached) in &self.waypoint_cache {
             let age_hours = Utc::now().signed_duration_since(cached.last_scanned).num_hours();
             let status = if age_hours <= self.cache_duration_hours { "✅ FRESH" } else { "🔄 STALE" };
-            println!("     • System {}: {} waypoints {} ({}h ago)", 
+            o_debug!("     • System {}: {} waypoints {} ({}h ago)", 
                     system, cached.waypoints.len(), status, age_hours);
         }
         
@@ -169,7 +170,7 @@ impl SurveyCache {
         for (waypoint, cached) in &self.survey_cache {
             let remaining_minutes = cached.expires_at.signed_duration_since(Utc::now()).num_minutes();
             if remaining_minutes > 0 {
-                println!("     • Surveys {}: {} deposits ({}min left)", 
+                o_debug!("     • Surveys {}: {} deposits ({}min left)", 
                         waypoint, cached.surveys.len(), remaining_minutes);
             }
         }
@@ -230,7 +231,7 @@ impl SurveyCache {
         self.waypoint_cache = cache_data.waypoint_cache;
         self.survey_cache = cache_data.survey_cache;
         
-        println!("💾 Loaded cache: {} systems, {} surveys", 
+        o_debug!("💾 Loaded cache: {} systems, {} surveys", 
                 self.waypoint_cache.len(), self.survey_cache.len());
         
         // Clean up expired entries immediately after loading

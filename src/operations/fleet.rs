@@ -1,5 +1,6 @@
 // Fleet management operations module
 use crate::client::SpaceTradersClient;
+use crate::{o_info};
 use crate::models::*;
 use crate::operations::ShipOperations;
 use std::collections::HashSet;
@@ -45,7 +46,7 @@ impl<'a> FleetOperations<'a> {
         mining_ships: &[Ship],
         asteroid_fields: &[Waypoint],
     ) -> Result<Vec<(Ship, Waypoint)>, Box<dyn std::error::Error>> {
-        println!("🚀 Deploying fleet to mining positions...");
+        o_info!("🚀 Deploying fleet to mining positions...");
         
         if asteroid_fields.is_empty() {
             return Err("No asteroid fields available for deployment".into());
@@ -53,35 +54,35 @@ impl<'a> FleetOperations<'a> {
         
         // Assign ships to asteroid fields (round-robin distribution)
         let mut target_assignments = Vec::new();
-        println!("🎯 Deploying {} ships to {} asteroid fields (multiple ships per field)", 
+        o_info!("🎯 Deploying {} ships to {} asteroid fields (multiple ships per field)", 
                 mining_ships.len(), asteroid_fields.len());
         
         for (i, ship) in mining_ships.iter().enumerate() {
             let target_asteroid = &asteroid_fields[i % asteroid_fields.len()];
             target_assignments.push((ship, target_asteroid));
-            println!("  📍 {} → {}", ship.symbol, target_asteroid.symbol);
+            o_info!("  📍 {} → {}", ship.symbol, target_asteroid.symbol);
         }
         
         // Navigate all ships to their assigned positions with fuel management
         for (ship, target_asteroid) in &target_assignments {
             if ship.nav.waypoint_symbol != target_asteroid.symbol {
-                println!("🧭 Navigating {} to {}...", ship.symbol, target_asteroid.symbol);
+                o_info!("🧭 Navigating {} to {}...", ship.symbol, target_asteroid.symbol);
                 
                 // Check fuel before navigation
-                println!("  ⛽ Current fuel: {}/{}", ship.fuel.current, ship.fuel.capacity);
+                o_info!("  ⛽ Current fuel: {}/{}", ship.fuel.current, ship.fuel.capacity);
                 
                 // Always refuel if fuel is below 90% to ensure successful navigation
                 let fuel_safety_threshold = (ship.fuel.capacity as f64 * 0.9) as i32;
                 if ship.fuel.current < fuel_safety_threshold {
-                    println!("  ⚠️ Low fuel detected ({} < {} safety threshold). Attempting to refuel...", 
+                    o_info!("  ⚠️ Low fuel detected ({} < {} safety threshold). Attempting to refuel...", 
                             ship.fuel.current, fuel_safety_threshold);
                     
                     // Dock if not already docked for refueling
                     if ship.nav.status != "DOCKED" {
                         match self.ship_ops.dock(&ship.symbol).await {
-                            Ok(_) => println!("    🛸 {} docked for refueling", ship.symbol),
+                            Ok(_) => o_info!("    🛸 {} docked for refueling", ship.symbol),
                             Err(e) => {
-                                eprintln!("    ❌ Could not dock {} for refueling: {}", ship.symbol, e);
+                                o_info!("    ❌ Could not dock {} for refueling: {}", ship.symbol, e);
                                 continue;
                             }
                         }
@@ -90,22 +91,22 @@ impl<'a> FleetOperations<'a> {
                     // Refuel ship at current location
                     match self.ship_ops.refuel(&ship.symbol).await {
                         Ok(refuel_data) => {
-                            println!("    ⛽ {} refueled! Fuel: {}/{} (Cost: {} credits)", 
+                            o_info!("    ⛽ {} refueled! Fuel: {}/{} (Cost: {} credits)", 
                                     ship.symbol,
                                     refuel_data.fuel.current, 
                                     refuel_data.fuel.capacity,
                                     refuel_data.transaction.total_price);
                         }
                         Err(e) => {
-                            eprintln!("    ⚠️ Could not refuel {}: {}", ship.symbol, e);
-                            println!("    💡 Current location may not offer refueling services");
+                            o_info!("    ⚠️ Could not refuel {}: {}", ship.symbol, e);
+                            o_info!("    💡 Current location may not offer refueling services");
                             
                             // Try to find a fuel station dynamically
                             let system_symbol = &ship.nav.system_symbol;
                             let waypoints = match self.client.get_system_waypoints(system_symbol, None).await {
                                 Ok(waypoints) => waypoints,
                                 Err(e) => {
-                                    println!("    ⚠️ Could not get waypoints to find fuel station: {}", e);
+                                    o_info!("    ⚠️ Could not get waypoints to find fuel station: {}", e);
                                     continue;
                                 }
                             };
@@ -117,37 +118,37 @@ impl<'a> FleetOperations<'a> {
                                 
                             match fuel_station {
                                 Some(station) => {
-                                    println!("    🚀 Attempting to navigate to fuel station {}...", station);
+                                    o_info!("    🚀 Attempting to navigate to fuel station {}...", station);
                                     
                                     // Try to go to the fuel station first
                                     match self.ship_ops.orbit(&ship.symbol).await {
                                         Ok(_) => {},
-                                        Err(e) => println!("    ⚠️ Could not orbit: {}", e),
+                                        Err(e) => o_info!("    ⚠️ Could not orbit: {}", e),
                                     }
                                     
                                     match self.ship_ops.navigate(&ship.symbol, &station).await {
                                 Ok(_) => {
-                                    println!("    ✅ Navigating to fuel station");
+                                    o_info!("    ✅ Navigating to fuel station");
                                     // Wait a bit for arrival
                                     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                                     
                                     // Dock and try to refuel at fuel station
                                     if let Ok(_) = self.ship_ops.dock(&ship.symbol).await {
                                         if let Ok(refuel_data) = self.ship_ops.refuel(&ship.symbol).await {
-                                            println!("    ⛽ {} refueled at fuel station! Fuel: {}/{}", 
+                                            o_info!("    ⛽ {} refueled at fuel station! Fuel: {}/{}", 
                                                     ship.symbol, refuel_data.fuel.current, refuel_data.fuel.capacity);
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    println!("    ❌ Could not navigate to fuel station: {}", e);
-                                    println!("    💡 Continuing with current fuel - may cause navigation issues");
+                                    o_info!("    ❌ Could not navigate to fuel station: {}", e);
+                                    o_info!("    💡 Continuing with current fuel - may cause navigation issues");
                                 }
                             }
                                 }
                                 None => {
-                                    println!("    ⚠️ No fuel stations found in {}", system_symbol);
-                                    println!("    💡 Continuing with current fuel - may cause navigation issues");
+                                    o_info!("    ⚠️ No fuel stations found in {}", system_symbol);
+                                    o_info!("    💡 Continuing with current fuel - may cause navigation issues");
                                 }
                             }
                         }
@@ -157,9 +158,9 @@ impl<'a> FleetOperations<'a> {
                 // Put ship in orbit if docked
                 if ship.nav.status == "DOCKED" {
                     match self.ship_ops.orbit(&ship.symbol).await {
-                        Ok(_) => println!("  ✅ {} put into orbit", ship.symbol),
+                        Ok(_) => o_info!("  ✅ {} put into orbit", ship.symbol),
                         Err(e) => {
-                            eprintln!("  ❌ Could not orbit {}: {}", ship.symbol, e);
+                            o_info!("  ❌ Could not orbit {}: {}", ship.symbol, e);
                             continue;
                         }
                     }
@@ -168,16 +169,16 @@ impl<'a> FleetOperations<'a> {
                 // Navigate to asteroid field
                 match self.ship_ops.navigate(&ship.symbol, &target_asteroid.symbol).await {
                     Ok(nav_data) => {
-                        println!("  ✅ {} navigation started (fuel: {}/{})", 
+                        o_info!("  ✅ {} navigation started (fuel: {}/{})", 
                                 ship.symbol, nav_data.fuel.current, nav_data.fuel.capacity);
                     }
                     Err(e) => {
-                        eprintln!("  ❌ {} navigation failed: {}", ship.symbol, e);
-                        println!("  💡 This may be due to insufficient fuel or other navigation constraints");
+                        o_info!("  ❌ {} navigation failed: {}", ship.symbol, e);
+                        o_info!("  💡 This may be due to insufficient fuel or other navigation constraints");
                     }
                 }
             } else {
-                println!("  ✅ {} already at {}", ship.symbol, target_asteroid.symbol);
+                o_info!("  ✅ {} already at {}", ship.symbol, target_asteroid.symbol);
             }
         }
         
@@ -195,12 +196,12 @@ impl<'a> FleetOperations<'a> {
         }
         
         if ships_navigating {
-            println!("⏳ Waiting for {} ships to complete navigation ({} seconds)...", 
+            o_info!("⏳ Waiting for {} ships to complete navigation ({} seconds)...", 
                     target_assignments.iter().filter(|(ship, target)| ship.nav.waypoint_symbol != target.symbol).count(),
                     max_navigation_time);
             tokio::time::sleep(tokio::time::Duration::from_secs(max_navigation_time)).await;
         } else {
-            println!("✅ All ships already at target locations - no deployment wait needed");
+            o_info!("✅ All ships already at target locations - no deployment wait needed");
         }
         
         // Assess readiness for mining operations
@@ -211,7 +212,7 @@ impl<'a> FleetOperations<'a> {
         &self,
         target_assignments: Vec<(&Ship, &Waypoint)>,
     ) -> Result<Vec<(Ship, Waypoint)>, Box<dyn std::error::Error>> {
-        println!("🛸 Ensuring all ships are in orbit for mining...");
+        o_info!("🛸 Ensuring all ships are in orbit for mining...");
         
         // Get current status of all ships
         let deployed_ships = self.client.get_ships().await?;
@@ -224,19 +225,19 @@ impl<'a> FleetOperations<'a> {
                     if current_ship.nav.status != "IN_ORBIT" {
                         match self.ship_ops.orbit(&current_ship.symbol).await {
                             Ok(_) => {
-                                println!("  ✅ {} in orbit at {}", current_ship.symbol, target_asteroid.symbol);
+                                o_info!("  ✅ {} in orbit at {}", current_ship.symbol, target_asteroid.symbol);
                                 ready_miners.push(((*current_ship).clone(), (*target_asteroid).clone()));
                             }
                             Err(e) => {
-                                eprintln!("  ❌ Could not orbit {}: {}", current_ship.symbol, e);
+                                o_info!("  ❌ Could not orbit {}: {}", current_ship.symbol, e);
                             }
                         }
                     } else {
-                        println!("  ✅ {} already in orbit at {}", current_ship.symbol, target_asteroid.symbol);
+                        o_info!("  ✅ {} already in orbit at {}", current_ship.symbol, target_asteroid.symbol);
                         ready_miners.push(((*current_ship).clone(), (*target_asteroid).clone()));
                     }
                 } else {
-                    eprintln!("  ⚠️  {} not at target (at {} instead of {})", 
+                    o_info!("  ⚠️  {} not at target (at {} instead of {})", 
                              current_ship.symbol, current_ship.nav.waypoint_symbol, target_asteroid.symbol);
                 }
             }
@@ -246,7 +247,7 @@ impl<'a> FleetOperations<'a> {
             return Err("No ships ready for mining!".into());
         }
         
-        println!("🎉 Fleet deployment complete: {}/{} ships ready for mining!", 
+        o_info!("🎉 Fleet deployment complete: {}/{} ships ready for mining!", 
                 ready_miners.len(), target_assignments.len());
         
         Ok(ready_miners)
@@ -257,12 +258,12 @@ impl<'a> FleetOperations<'a> {
         mining_ships: &[Ship],
         asteroid_fields: &[Waypoint],
     ) -> Result<Vec<(Ship, Waypoint)>, Box<dyn std::error::Error>> {
-        println!("🚀 Coordinating fleet operations for autonomous mining...");
+        o_info!("🚀 Coordinating fleet operations for autonomous mining...");
         
         // Deploy fleet to mining positions
         let ready_miners = self.deploy_mining_fleet(mining_ships, asteroid_fields).await?;
         
-        println!("🚀 Coordinating {} ships across {} asteroid fields!", 
+        o_info!("🚀 Coordinating {} ships across {} asteroid fields!", 
                 ready_miners.len(),
                 ready_miners.iter()
                     .map(|(_, asteroid)| asteroid.symbol.as_str())

@@ -1,6 +1,7 @@
 // Persistent ship state storage system
 use std::collections::HashMap;
 use std::fs;
+use crate::{o_debug};
 use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -67,8 +68,8 @@ impl ShipStateStore {
         
         // Load existing ship states
         if let Err(e) = store.load_from_disk() {
-            println!("⚠️ Failed to load ship state storage: {}", e);
-            println!("💾 Starting with empty ship state cache");
+            o_debug!("⚠️ Failed to load ship state storage: {}", e);
+            o_debug!("💾 Starting with empty ship state cache");
         }
         
         store
@@ -80,7 +81,7 @@ impl ShipStateStore {
         
         self.ships.insert(ship_symbol.clone(), cached_state);
         
-        println!("💾 Cached state for {}: Location: {}, Cargo: {}/{}, Fuel: {}/{}", 
+        o_debug!("💾 Cached state for {}: Location: {}, Cargo: {}/{}, Fuel: {}/{}", 
                 ship_symbol,
                 self.ships[&ship_symbol].ship.nav.waypoint_symbol,
                 self.ships[&ship_symbol].ship.cargo.units,
@@ -111,7 +112,7 @@ impl ShipStateStore {
     pub fn mark_ship_action(&mut self, ship_symbol: &str, action: &str) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(cached) = self.ships.get_mut(ship_symbol) {
             cached.add_pending_action(action);
-            println!("📝 Marked {} as stale due to action: {}", ship_symbol, action);
+            o_debug!("📝 Marked {} as stale due to action: {}", ship_symbol, action);
             self.save_to_disk()?;
         }
         Ok(())
@@ -132,7 +133,7 @@ impl ShipStateStore {
             self.ships.insert(ship_symbol.clone(), CachedShipState::new(ship));
         }
         
-        println!("🔄 Refreshed {} from API", ship_symbol);
+        o_debug!("🔄 Refreshed {} from API", ship_symbol);
         self.save_to_disk()?;
         Ok(())
     }
@@ -154,15 +155,15 @@ impl ShipStateStore {
     }
     
     pub fn print_cache_status(&self) {
-        println!("💾 Ship State Cache Status:");
-        println!("   📊 Cached ships: {}", self.ships.len());
-        println!("   ⏱️  Staleness threshold: {} minutes", self.staleness_threshold_minutes);
+        o_debug!("💾 Ship State Cache Status:");
+        o_debug!("   📊 Cached ships: {}", self.ships.len());
+        o_debug!("   ⏱️  Staleness threshold: {} minutes", self.staleness_threshold_minutes);
         
         let stale_count = self.get_stale_ships().len();
         if stale_count > 0 {
-            println!("   🔄 Stale ships needing refresh: {}", stale_count);
+            o_debug!("   🔄 Stale ships needing refresh: {}", stale_count);
         } else {
-            println!("   ✅ All ships have fresh cache");
+            o_debug!("   ✅ All ships have fresh cache");
         }
         
         for (ship_symbol, cached) in &self.ships {
@@ -173,12 +174,12 @@ impl ShipStateStore {
                 "✅ FRESH"
             };
             
-            println!("     • {}: {} ({}min ago, {} pending actions)", 
+            o_debug!("     • {}: {} ({}min ago, {} pending actions)", 
                     ship_symbol, status, age_minutes, cached.pending_actions.len());
             
             if !cached.pending_actions.is_empty() {
                 for action in &cached.pending_actions {
-                    println!("       - Pending: {}", action);
+                    o_debug!("       - Pending: {}", action);
                 }
             }
         }
@@ -195,7 +196,7 @@ impl ShipStateStore {
         
         let removed = initial_count - self.ships.len();
         if removed > 0 {
-            println!("🧹 Cleaned up {} old ship cache entries", removed);
+            o_debug!("🧹 Cleaned up {} old ship cache entries", removed);
             self.save_to_disk()?;
         }
         
@@ -216,7 +217,7 @@ impl ShipStateStore {
             self.ships.insert(cached.ship.symbol.clone(), cached);
         }
         
-        println!("💾 Loaded {} ship states from cache", self.ships.len());
+        o_debug!("💾 Loaded {} ship states from cache", self.ships.len());
         
         // Clean up old entries immediately after loading
         self.cleanup_old_cache(24)?; // Remove entries older than 24 hours

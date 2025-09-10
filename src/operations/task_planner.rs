@@ -1,5 +1,6 @@
 // Task Planner - Creates execution plans for ship actions
 use crate::client::SpaceTradersClient;
+use crate::{o_debug};
 use crate::models::*;
 use crate::operations::ship_actor::ShipAction;
 use crate::operations::navigation::NavigationPlanner;
@@ -248,7 +249,7 @@ impl TaskPlanner {
                 return self.plan_direct_navigation(ship, destination, &dest_waypoint).await;
             } else {
                 // Need refuel stops - plan multi-hop route
-                println!("🗺️ {} needs multi-hop route to {} (fuel: {}/{} needed)", 
+                o_debug!("🗺️ {} needs multi-hop route to {} (fuel: {}/{} needed)", 
                         ship.symbol, destination, available_fuel, fuel_needed);
                 return self.plan_multihop_navigation(ship, destination, &dest_waypoint).await;
             }
@@ -391,7 +392,7 @@ impl TaskPlanner {
                 });
                 total_fuel += fuel_needed_to_dest;
 
-                println!("🛣️ Multi-hop route planned: {} -> {} -> {} (total fuel: {})", 
+                o_debug!("🛣️ Multi-hop route planned: {} -> {} -> {} (total fuel: {})", 
                         ship.nav.waypoint_symbol, fuel_station.symbol, destination, total_fuel);
             }
             None => {
@@ -426,7 +427,7 @@ impl TaskPlanner {
                 Ok(fuel_stations)
             }
             Err(e) => {
-                println!("⚠️ Failed to fetch waypoints for fuel stations in {}: {}", system_symbol, e);
+                o_debug!("⚠️ Failed to fetch waypoints for fuel stations in {}: {}", system_symbol, e);
                 Ok(Vec::new())
             }
         }
@@ -470,7 +471,7 @@ impl TaskPlanner {
                 Ok(found)
             }
             Err(e) => {
-                println!("⚠️ Failed to fetch waypoint info for {}: {}", waypoint_symbol, e);
+                o_debug!("⚠️ Failed to fetch waypoint info for {}: {}", waypoint_symbol, e);
                 Ok(None)
             }
         }

@@ -1,5 +1,6 @@
 // Trading operations module
 use crate::client::SpaceTradersClient;
+use crate::{o_info};
 use crate::models::*;
 use crate::operations::ShipOperations;
 use tokio::time::{sleep, Duration};
@@ -59,7 +60,7 @@ impl<'a> TradingOperations<'a> {
                     continue;
                 }
                 Err(e) => {
-                    println!("      ⚠️ Could not check market compatibility for {}: {}", item.symbol, e);
+                    o_info!("      ⚠️ Could not check market compatibility for {}: {}", item.symbol, e);
                     // Continue trying to sell - let the API tell us if it fails
                     sellable_items.push(item);
                 }
@@ -90,7 +91,7 @@ impl<'a> TradingOperations<'a> {
         _ships: &[Ship],
         contract_materials: &[String],
     ) -> Result<(i64, i32), Box<dyn std::error::Error>> {
-        println!("💰 Starting autonomous cargo selling operations...");
+        o_info!("💰 Starting autonomous cargo selling operations...");
         
         // Get current ships with cargo
         let ships_for_selling = self.client.get_ships().await?;
@@ -107,19 +108,19 @@ impl<'a> TradingOperations<'a> {
                 continue; // Skip empty ships
             }
             
-            println!("\n💼 Analyzing cargo on {}...", ship.symbol);
-            println!("  📍 Current location: {}", ship.nav.waypoint_symbol);
-            println!("  📦 Cargo: {}/{} units", ship.cargo.units, ship.cargo.capacity);
+            o_info!("\n💼 Analyzing cargo on {}...", ship.symbol);
+            o_info!("  📍 Current location: {}", ship.nav.waypoint_symbol);
+            o_info!("  📦 Cargo: {}/{} units", ship.cargo.units, ship.cargo.capacity);
             
             // Separate contract materials from sellable cargo
             let (contract_items, all_sellable_items) = self.categorize_cargo(ship, contract_materials);
             
             for item in &contract_items {
-                println!("  🎯 {} x{} - RESERVED for contract", item.symbol, item.units);
+                o_info!("  🎯 {} x{} - RESERVED for contract", item.symbol, item.units);
             }
             
             // Check market compatibility for each sellable item
-            println!("  🏪 Checking market compatibility at {}...", ship.nav.waypoint_symbol);
+            o_info!("  🏪 Checking market compatibility at {}...", ship.nav.waypoint_symbol);
             let market_compatible_items = self.get_sellable_items_at_market(ship, contract_materials).await;
             
             let sellable_items = match market_compatible_items {
@@ -127,51 +128,51 @@ impl<'a> TradingOperations<'a> {
                     // Show what can and cannot be sold
                     for item in &all_sellable_items {
                         if items.iter().any(|sellable| sellable.symbol == item.symbol) {
-                            println!("  💰 {} x{} - SELLABLE at this market", item.symbol, item.units);
+                            o_info!("  💰 {} x{} - SELLABLE at this market", item.symbol, item.units);
                         } else {
-                            println!("  ❌ {} x{} - NOT ACCEPTED at this market", item.symbol, item.units);
+                            o_info!("  ❌ {} x{} - NOT ACCEPTED at this market", item.symbol, item.units);
                         }
                     }
                     items
                 },
                 Err(e) => {
-                    println!("  ❌ Could not check market compatibility: {}", e);
+                    o_info!("  ❌ Could not check market compatibility: {}", e);
                     // Fallback to original logic if market check fails
                     for item in &all_sellable_items {
-                        println!("  ⚠️ {} x{} - TRYING ANYWAY (compatibility check failed)", item.symbol, item.units);
+                        o_info!("  ⚠️ {} x{} - TRYING ANYWAY (compatibility check failed)", item.symbol, item.units);
                     }
                     all_sellable_items
                 }
             };
             
             if sellable_items.is_empty() && contract_items.is_empty() {
-                println!("  ✅ No cargo to analyze");
+                o_info!("  ✅ No cargo to analyze");
                 continue;
             } else if sellable_items.is_empty() {
-                println!("  ✅ No sellable cargo (all reserved for contracts or not accepted here)");
+                o_info!("  ✅ No sellable cargo (all reserved for contracts or not accepted here)");
                 continue;
             }
             
             // Dock ship for selling (required by SpaceTraders API)
             if ship.nav.status != "DOCKED" {
-                println!("  🛸 Docking {} for cargo sales...", ship.symbol);
+                o_info!("  🛸 Docking {} for cargo sales...", ship.symbol);
                 match self.ship_ops.dock(&ship.symbol).await {
-                    Ok(_) => println!("    ✅ Ship docked successfully"),
+                    Ok(_) => o_info!("    ✅ Ship docked successfully"),
                     Err(e) => {
-                        println!("    ❌ Could not dock ship: {}", e);
+                        o_info!("    ❌ Could not dock ship: {}", e);
                         continue;
                     }
                 }
             } else {
-                println!("  ✅ Ship already docked");
+                o_info!("  ✅ Ship already docked");
             }
             
             // Sell all market-compatible non-contract materials
-            println!("  💸 Selling {} different cargo types...", sellable_items.len());
+            o_info!("  💸 Selling {} different cargo types...", sellable_items.len());
             
             for item in &sellable_items {
                 total_sale_attempts += 1;
-                println!("    💰 Selling {} x{} {}...", item.units, item.symbol, item.name);
+                o_info!("    💰 Selling {} x{} {}...", item.units, item.symbol, item.name);
                 
                 // Retry logic for rate limits
                 let mut retry_count = 0;
@@ -181,9 +182,9 @@ impl<'a> TradingOperations<'a> {
                     match self.sell_cargo(&ship.symbol, &item.symbol, item.units).await {
                         Ok(sell_data) => {
                             let transaction = &sell_data.transaction;
-                            println!("      ✅ SOLD! {} credits ({} per unit)", 
+                            o_info!("      ✅ SOLD! {} credits ({} per unit)", 
                                     transaction.total_price, transaction.price_per_unit);
-                            println!("      📊 Agent credits updated: {}", sell_data.agent.credits);
+                            o_info!("      📊 Agent credits updated: {}", sell_data.agent.credits);
                             
                             total_revenue += transaction.total_price as i64;
                             items_sold += transaction.units;
@@ -199,11 +200,11 @@ impl<'a> TradingOperations<'a> {
                             // Check if it's a rate limit error
                             if error_str.contains("429") && retry_count < max_retries {
                                 retry_count += 1;
-                                println!("      ⏳ Rate limit hit, retry {}/{} in 2 seconds...", retry_count, max_retries);
+                                o_info!("      ⏳ Rate limit hit, retry {}/{} in 2 seconds...", retry_count, max_retries);
                                 sleep(Duration::from_secs(2)).await;
                                 continue;
                             } else {
-                                println!("      ❌ Sale failed: {}", e);
+                                o_info!("      ❌ Sale failed: {}", e);
                                 failed_sales += 1;
                                 break;
                             }
@@ -215,39 +216,39 @@ impl<'a> TradingOperations<'a> {
             // Put ship back in orbit after selling
             if ship.nav.status == "DOCKED" {
                 match self.ship_ops.orbit(&ship.symbol).await {
-                    Ok(_) => println!("  🚀 {} returned to orbit", ship.symbol),
-                    Err(e) => println!("  ⚠️ Could not return {} to orbit: {}", ship.symbol, e),
+                    Ok(_) => o_info!("  🚀 {} returned to orbit", ship.symbol),
+                    Err(e) => o_info!("  ⚠️ Could not return {} to orbit: {}", ship.symbol, e),
                 }
             }
         }
         
         // Comprehensive sales summary
-        println!("\n💰 CARGO SALES COMPLETE!");
-        println!("  📊 Sales Summary:");
-        println!("    🎯 Total sale attempts: {}", total_sale_attempts);
-        println!("    ✅ Successful sales: {}", successful_sales);
-        println!("    ❌ Failed sales: {}", failed_sales);
-        println!("    📦 Total items sold: {}", items_sold);
-        println!("    💵 Total revenue: {} credits", total_revenue);
+        o_info!("\n💰 CARGO SALES COMPLETE!");
+        o_info!("  📊 Sales Summary:");
+        o_info!("    🎯 Total sale attempts: {}", total_sale_attempts);
+        o_info!("    ✅ Successful sales: {}", successful_sales);
+        o_info!("    ❌ Failed sales: {}", failed_sales);
+        o_info!("    📦 Total items sold: {}", items_sold);
+        o_info!("    💵 Total revenue: {} credits", total_revenue);
         
         if items_sold > 0 {
-            println!("    📈 Average price per unit: {} credits", total_revenue / items_sold as i64);
+            o_info!("    📈 Average price per unit: {} credits", total_revenue / items_sold as i64);
         }
         
         // Determine overall success
         if successful_sales > 0 && total_revenue > 0 {
-            println!("  🎉 Cargo selling completed with revenue generated!");
-            println!("  💡 Funds available for fleet expansion and operations");
+            o_info!("  🎉 Cargo selling completed with revenue generated!");
+            o_info!("  💡 Funds available for fleet expansion and operations");
             if failed_sales > 0 {
-                println!("  ⚠️ {} sales failed (market incompatibility or rate limits)", failed_sales);
+                o_info!("  ⚠️ {} sales failed (market incompatibility or rate limits)", failed_sales);
             }
         } else if total_sale_attempts > 0 {
-            println!("  ❌ All sales failed - no revenue generated");
+            o_info!("  ❌ All sales failed - no revenue generated");
             if failed_sales > 0 {
-                println!("  💡 Check market compatibility and rate limiting");
+                o_info!("  💡 Check market compatibility and rate limiting");
             }
         } else {
-            println!("  ℹ️ No sales attempted (all materials reserved for contracts or no compatible markets)");
+            o_info!("  ℹ️ No sales attempted (all materials reserved for contracts or no compatible markets)");
         }
         
         Ok((total_revenue, items_sold))

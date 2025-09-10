@@ -1,5 +1,6 @@
 // Ship prioritization system for optimal task assignment
 use crate::client::SpaceTradersClient;
+use crate::{o_debug};
 use crate::models::*;
 use crate::operations::ship_actor::ShipActorStatus;
 use std::collections::HashMap;
@@ -40,7 +41,7 @@ impl ShipPrioritizer {
     }
 
     pub async fn analyze_fleet_performance(&mut self, ships: &[Ship], contract: &Contract) -> Result<Vec<ShipPerformanceMetrics>, Box<dyn std::error::Error>> {
-        println!("📊 Analyzing fleet performance for optimal task assignment...");
+        o_debug!("📊 Analyzing fleet performance for optimal task assignment...");
         
         let needed_materials: Vec<String> = contract.terms.deliver
             .iter()
@@ -65,10 +66,10 @@ impl ShipPrioritizer {
                 capabilities,
             };
             
-            println!("📈 {} Analysis:", ship.symbol);
-            println!("   Contract Contribution: {:.1}%", ship_metrics.contract_contribution * 100.0);
-            println!("   Income Generation: {:.0} credits/hour", ship_metrics.income_generation);
-            println!("   Efficiency Score: {:.2}", ship_metrics.efficiency_score);
+            o_debug!("📈 {} Analysis:", ship.symbol);
+            o_debug!("   Contract Contribution: {:.1}%", ship_metrics.contract_contribution * 100.0);
+            o_debug!("   Income Generation: {:.0} credits/hour", ship_metrics.income_generation);
+            o_debug!("   Efficiency Score: {:.2}", ship_metrics.efficiency_score);
             
             metrics.push(ship_metrics);
         }
@@ -79,9 +80,9 @@ impl ShipPrioritizer {
         // Sort by priority (highest first)
         metrics.sort_by(|a, b| b.priority_weight.partial_cmp(&a.priority_weight).unwrap());
         
-        println!("\n🎯 Fleet Priority Ranking:");
+        o_debug!("\n🎯 Fleet Priority Ranking:");
         for (i, metric) in metrics.iter().enumerate() {
-            println!("   {}. {} - Priority: {:.2} ({})", 
+            o_debug!("   {}. {} - Priority: {:.2} ({})", 
                     i + 1, 
                     metric.ship_symbol, 
                     metric.priority_weight,
@@ -264,7 +265,7 @@ impl ShipPrioritizer {
             if let Some(lowest_metrics) = fleet_metrics.iter().find(|m| m.ship_symbol == lowest_priority_ship) {
                 // If the new task is significantly more important than what the lowest priority ship is doing
                 if new_task_priority > lowest_metrics.priority_weight * 1.5 { // 50% threshold
-                    println!("🔄 Task reassignment recommended: {} (priority {:.2}) should yield to new task (priority {:.2})",
+                    o_debug!("🔄 Task reassignment recommended: {} (priority {:.2}) should yield to new task (priority {:.2})",
                             lowest_priority_ship, lowest_metrics.priority_weight, new_task_priority);
                     return Some(lowest_priority_ship);
                 }

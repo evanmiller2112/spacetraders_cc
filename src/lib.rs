@@ -8,6 +8,8 @@ pub mod admiral;
 pub mod storage;
 pub mod debug;
 pub mod config;
+pub mod verbosity;
+pub mod output_broker;
 
 // Re-export commonly used types
 pub use models::{

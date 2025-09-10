@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::{o_info};
 use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
@@ -130,15 +131,15 @@ impl SpaceTradersConfig {
     /// Load configuration from file, creating default if it doesn't exist
     pub fn load_or_create(config_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         if Path::new(config_path).exists() {
-            println!("📋 Loading configuration from {}", config_path);
+            o_info!("📋 Loading configuration from {}", config_path);
             let config_str = fs::read_to_string(config_path)?;
             let config: SpaceTradersConfig = toml::from_str(&config_str)?;
             Ok(config)
         } else {
-            println!("📋 Creating default configuration at {}", config_path);
+            o_info!("📋 Creating default configuration at {}", config_path);
             let config = SpaceTradersConfig::default();
             config.save(config_path)?;
-            println!("💡 Edit {} to customize bot behavior", config_path);
+            o_info!("💡 Edit {} to customize bot behavior", config_path);
             Ok(config)
         }
     }
@@ -178,18 +179,18 @@ impl SpaceTradersConfig {
             return Err("main_cycle_delay_seconds must be greater than 0".to_string());
         }
 
-        println!("✅ Configuration validation passed");
+        o_info!("✅ Configuration validation passed");
         Ok(())
     }
 
     /// Print configuration summary
     pub fn print_summary(&self) {
-        println!("📋 Configuration Summary:");
-        println!("   💰 Ship purchase: {} credits minimum", self.fleet.min_credits_for_ship_purchase);
-        println!("   ⛽ Refuel threshold: {:.1}%", self.fuel.refuel_threshold * 100.0);
-        println!("   ⏰ Cycle delay: {}s", self.timing.main_cycle_delay_seconds);
-        println!("   📦 Contract cache: {}s", self.contracts.cache_duration_seconds);
-        println!("   🔄 Config reload: {}s", self.timing.config_reload_interval_seconds);
+        o_info!("📋 Configuration Summary:");
+        o_info!("   💰 Ship purchase: {} credits minimum", self.fleet.min_credits_for_ship_purchase);
+        o_info!("   ⛽ Refuel threshold: {:.1}%", self.fuel.refuel_threshold * 100.0);
+        o_info!("   ⏰ Cycle delay: {}s", self.timing.main_cycle_delay_seconds);
+        o_info!("   📦 Contract cache: {}s", self.contracts.cache_duration_seconds);
+        o_info!("   🔄 Config reload: {}s", self.timing.config_reload_interval_seconds);
     }
 }
 
@@ -267,20 +268,20 @@ impl ConfigManager {
                                                 self.config.timing.config_reload_interval_seconds, 
                                                 self.config.fleet.min_credits_for_ship_purchase);
                         
-                        println!("🔄 Configuration reloaded successfully!");
+                        o_info!("🔄 Configuration reloaded successfully!");
                         if old_values != new_values {
-                            println!("   📝 Changes: {} → {}", old_values, new_values);
+                            o_info!("   📝 Changes: {} → {}", old_values, new_values);
                         }
                         true
                     }
                     Err(e) => {
-                        println!("⚠️ Invalid configuration detected, keeping current config: {}", e);
+                        o_info!("⚠️ Invalid configuration detected, keeping current config: {}", e);
                         false
                     }
                 }
             }
             Err(e) => {
-                println!("⚠️ Failed to reload configuration, keeping current config: {}", e);
+                o_info!("⚠️ Failed to reload configuration, keeping current config: {}", e);
                 false
             }
         }

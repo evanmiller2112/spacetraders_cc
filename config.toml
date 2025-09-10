@@ -39,7 +39,7 @@ cache_duration_seconds = 30
 # Main cycle delay in seconds
 main_cycle_delay_seconds = 10
 # Retry delay after errors in seconds  
-error_retry_delay_seconds = 60
+error_retry_delay_seconds = 1
 # Config hot-reload check interval in seconds
 config_reload_interval_seconds = 30
 # Fleet coordination timeout in seconds (max time for autonomous operations)

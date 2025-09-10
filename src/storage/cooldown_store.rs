@@ -1,6 +1,7 @@
 // Persistent cooldown storage system
 use std::collections::HashMap;
 use std::fs;
+use crate::{o_debug};
 use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -26,8 +27,8 @@ impl CooldownStore {
         
         // Load existing cooldowns
         if let Err(e) = store.load_from_disk() {
-            println!("⚠️ Failed to load cooldown storage: {}", e);
-            println!("💾 Starting with empty cooldown storage");
+            o_debug!("⚠️ Failed to load cooldown storage: {}", e);
+            o_debug!("💾 Starting with empty cooldown storage");
         }
         
         store
@@ -45,7 +46,7 @@ impl CooldownStore {
         
         self.cooldowns.insert(ship_symbol.to_string(), entry.clone());
         
-        println!("💾 Stored cooldown for {}: until {} ({:.1}s)", 
+        o_debug!("💾 Stored cooldown for {}: until {} ({:.1}s)", 
                 ship_symbol, 
                 cooldown_until.format("%H:%M:%S UTC"),
                 cooldown_seconds);
@@ -75,7 +76,7 @@ impl CooldownStore {
     
     pub fn clear_cooldown(&mut self, ship_symbol: &str) -> Result<(), Box<dyn std::error::Error>> {
         if self.cooldowns.remove(ship_symbol).is_some() {
-            println!("🗑️ Cleared cooldown for {}", ship_symbol);
+            o_debug!("🗑️ Cleared cooldown for {}", ship_symbol);
             self.save_to_disk()?;
         }
         Ok(())
@@ -91,7 +92,7 @@ impl CooldownStore {
         
         let removed = initial_count - self.cooldowns.len();
         if removed > 0 {
-            println!("🧹 Cleaned up {} expired cooldown entries", removed);
+            o_debug!("🧹 Cleaned up {} expired cooldown entries", removed);
             self.save_to_disk()?;
         }
         
@@ -127,7 +128,7 @@ impl CooldownStore {
             self.cooldowns.insert(entry.ship_symbol.clone(), entry);
         }
         
-        println!("💾 Loaded {} cooldown entries from disk", self.cooldowns.len());
+        o_debug!("💾 Loaded {} cooldown entries from disk", self.cooldowns.len());
         
         // Clean up expired entries immediately after loading
         self.cleanup_expired()?;
@@ -153,11 +154,11 @@ impl CooldownStore {
         let active = self.list_active_cooldowns();
         
         if active.is_empty() {
-            println!("💾 Cooldown Storage: All ships ready");
+            o_debug!("💾 Cooldown Storage: All ships ready");
         } else {
-            println!("💾 Cooldown Storage: {} active cooldowns", active.len());
+            o_debug!("💾 Cooldown Storage: {} active cooldowns", active.len());
             for (ship, remaining) in active {
-                println!("   • {}: {:.1}s remaining", ship, remaining);
+                o_debug!("   • {}: {:.1}s remaining", ship, remaining);
             }
         }
     }

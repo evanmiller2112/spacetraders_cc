@@ -1,5 +1,6 @@
 // Shipyard operations for purchasing and outfitting ships
 use crate::client::SpaceTradersClient;
+use crate::{o_info};
 use crate::models::*;
 
 pub struct ShipyardOperations {
@@ -13,12 +14,12 @@ impl ShipyardOperations {
     
     /// Find shipyards in available systems, using exploration if needed
     pub async fn find_shipyards(&self) -> Result<Vec<ShipyardLocation>, Box<dyn std::error::Error>> {
-        println!("🔍 Searching for shipyards across known systems...");
+        o_info!("🔍 Searching for shipyards across known systems...");
         
         let mut shipyard_locations = Vec::new();
         
         // First, check our home system thoroughly
-        println!("🏠 Checking home system for shipyards...");
+        o_info!("🏠 Checking home system for shipyards...");
         match self.client.get_system_waypoints_with_traits("X1-N5", "SHIPYARD").await {
             Ok(waypoints) => {
                 for waypoint in &waypoints {
@@ -29,24 +30,24 @@ impl ShipyardOperations {
                         traits: waypoint.traits.clone(),
                     };
                     shipyard_locations.push(location);
-                    println!("🏭 Found shipyard in home system: {}", waypoint.symbol);
+                    o_info!("🏭 Found shipyard in home system: {}", waypoint.symbol);
                 }
             }
             Err(e) => {
-                println!("⚠️ Failed to check home system: {}", e);
+                o_info!("⚠️ Failed to check home system: {}", e);
             }
         }
         
         if !shipyard_locations.is_empty() {
-            println!("✅ Found {} shipyards in home system", shipyard_locations.len());
+            o_info!("✅ Found {} shipyards in home system", shipyard_locations.len());
             return Ok(shipyard_locations);
         }
         
         // If no shipyards in home system, search nearby systems
-        println!("🔍 No shipyards in home system, searching nearby systems...");
+        o_info!("🔍 No shipyards in home system, searching nearby systems...");
         
         let systems = self.client.get_systems(Some(1), Some(20)).await?;
-        println!("📊 Searching {} systems for shipyards", systems.len());
+        o_info!("📊 Searching {} systems for shipyards", systems.len());
         
         for system in &systems {
             // Skip home system since we already checked it
@@ -62,7 +63,7 @@ impl ShipyardOperations {
                         .collect();
                     
                     if !charted_waypoints.is_empty() {
-                        println!("📊 System {} has {} shipyards", system.symbol, charted_waypoints.len());
+                        o_info!("📊 System {} has {} shipyards", system.symbol, charted_waypoints.len());
                     }
                     
                     for waypoint in charted_waypoints {
@@ -73,26 +74,26 @@ impl ShipyardOperations {
                             traits: waypoint.traits.clone(),
                         };
                         shipyard_locations.push(location);
-                        println!("🏭 Found shipyard: {} in {}", waypoint.symbol, system.symbol);
+                        o_info!("🏭 Found shipyard: {} in {}", waypoint.symbol, system.symbol);
                     }
                 }
                 Err(e) => {
-                    println!("⚠️ Failed to access system {}: {}", system.symbol, e);
+                    o_info!("⚠️ Failed to access system {}: {}", system.symbol, e);
                 }
             }
         }
         
         if shipyard_locations.is_empty() {
-            println!("❌ No shipyards found in charted systems");
-            println!("💡 Suggestion: Use probe ship to explore and scan more systems");
+            o_info!("❌ No shipyards found in charted systems");
+            o_info!("💡 Suggestion: Use probe ship to explore and scan more systems");
             
             // For now, return an error that indicates we need exploration
             return Err("No shipyards found - exploration required to discover shipyards in uncharted systems".into());
         }
         
-        println!("🏭 Found {} shipyards total", shipyard_locations.len());
+        o_info!("🏭 Found {} shipyards total", shipyard_locations.len());
         for location in &shipyard_locations {
-            println!("  • {} in {}", location.waypoint_symbol, location.system_symbol);
+            o_info!("  • {} in {}", location.waypoint_symbol, location.system_symbol);
         }
         
         Ok(shipyard_locations)
@@ -100,7 +101,7 @@ impl ShipyardOperations {
     
     /// Purchase a mining ship similar to the reference ship
     pub async fn purchase_mining_ship(&self, shipyard_location: &ShipyardLocation, reference_ship: &Ship) -> Result<Ship, Box<dyn std::error::Error>> {
-        println!("🏗️ Purchasing mining ship at {}", shipyard_location.waypoint_symbol);
+        o_info!("🏗️ Purchasing mining ship at {}", shipyard_location.waypoint_symbol);
         
         // Get shipyard details to see available ships
         let shipyard = self.client.get_shipyard(&shipyard_location.system_symbol, &shipyard_location.waypoint_symbol).await?;
@@ -116,19 +117,19 @@ impl ShipyardOperations {
             });
             
             if let Some(ship_to_buy) = suitable_ship {
-                println!("🎯 Found suitable ship: {} - {} credits", ship_to_buy.ship_type, ship_to_buy.purchase_price);
-                println!("   📝 {}", ship_to_buy.description);
+                o_info!("🎯 Found suitable ship: {} - {} credits", ship_to_buy.ship_type, ship_to_buy.purchase_price);
+                o_info!("   📝 {}", ship_to_buy.description);
                 
                 // Check if we have enough credits
                 let agent = self.client.get_agent().await?;
                 if agent.credits >= ship_to_buy.purchase_price as i64 {
-                    println!("💰 Purchasing {} for {} credits", ship_to_buy.ship_type, ship_to_buy.purchase_price);
+                    o_info!("💰 Purchasing {} for {} credits", ship_to_buy.ship_type, ship_to_buy.purchase_price);
                     
                     let purchase_data = self.client.purchase_ship(&ship_to_buy.ship_type, &shipyard_location.waypoint_symbol).await?;
                     
-                    println!("✅ Successfully purchased ship: {}", purchase_data.ship.symbol);
-                    println!("   💸 Transaction cost: {} credits", purchase_data.transaction.price);
-                    println!("   💰 Remaining credits: {}", purchase_data.agent.credits);
+                    o_info!("✅ Successfully purchased ship: {}", purchase_data.ship.symbol);
+                    o_info!("   💸 Transaction cost: {} credits", purchase_data.transaction.price);
+                    o_info!("   💰 Remaining credits: {}", purchase_data.agent.credits);
                     
                     Ok(purchase_data.ship)
                 } else {
@@ -145,26 +146,26 @@ impl ShipyardOperations {
     
     /// Outfit a newly purchased ship with mining equipment
     pub async fn outfit_mining_ship(&self, ship: &Ship, reference_ship: &Ship) -> Result<(), Box<dyn std::error::Error>> {
-        println!("🛠️ Outfitting {} with mining equipment", ship.symbol);
+        o_info!("🛠️ Outfitting {} with mining equipment", ship.symbol);
         
         // For now, this would require additional mount/module installation APIs
         // which may not be implemented yet
-        println!("   🎯 Target configuration (based on {}):", reference_ship.symbol);
+        o_info!("   🎯 Target configuration (based on {}):", reference_ship.symbol);
         
         for mount in &reference_ship.mounts {
             if mount.symbol.contains("MINING") || mount.symbol.contains("SURVEYOR") {
-                println!("     • Install {} - {}", mount.symbol, mount.name);
+                o_info!("     • Install {} - {}", mount.symbol, mount.name);
             }
         }
         
         for module in &reference_ship.modules {
             if module.symbol.contains("CARGO") || module.symbol.contains("PROCESSOR") {
-                println!("     • Install {} - {}", module.symbol, module.name);
+                o_info!("     • Install {} - {}", module.symbol, module.name);
             }
         }
         
-        println!("   ⚠️ Outfitting system needs ship modification APIs");
-        println!("   💡 Ship can be used as-is for basic mining operations");
+        o_info!("   ⚠️ Outfitting system needs ship modification APIs");
+        o_info!("   💡 Ship can be used as-is for basic mining operations");
         
         Ok(())
     }

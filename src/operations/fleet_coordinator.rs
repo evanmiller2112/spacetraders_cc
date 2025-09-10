@@ -1,5 +1,6 @@
 // Fleet Coordinator - Manages ship actors and task assignment
 use crate::client::SpaceTradersClient;
+use crate::{o_error, o_summary, o_info, o_debug};
 use crate::models::*;
 use crate::operations::ship_actor::*;
 use crate::operations::ship_prioritizer::*;
@@ -58,7 +59,7 @@ impl FleetCoordinator {
     }
 
     pub async fn initialize_fleet(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("🚀 Initializing fleet with cached state system...");
+        o_info!("🚀 Initializing fleet with cached state system...");
         
         // Print cache status first
         self.ship_cache.print_cache_status();
@@ -66,7 +67,7 @@ impl FleetCoordinator {
         
         // Get all ships from API (we need this once to know what ships exist)
         let ships = self.client.get_ships().await?;
-        println!("📡 Fetched {} ships from API", ships.len());
+        o_info!("📡 Fetched {} ships from API", ships.len());
         
         // Cache all ships
         for ship in &ships {
@@ -78,7 +79,7 @@ impl FleetCoordinator {
             self.spawn_ship_actor(ship).await?;
         }
         
-        println!("✅ Fleet initialization complete - {} ship actors spawned with cached states", self.ship_queues.len());
+        o_summary!("✅ Fleet initialization complete - {} ship actors spawned with cached states", self.ship_queues.len());
         self.ship_cache.print_cache_status();
         Ok(())
     }
@@ -89,8 +90,8 @@ impl FleetCoordinator {
         // Create action channel for this ship
         let (action_sender, action_receiver) = mpsc::unbounded_channel();
         
-        // Clone client for the actor
-        let client_clone = SpaceTradersClient::new(self.client.token.clone());
+        // Clone client for the actor (shares the same broker for centralized rate limiting)
+        let client_clone = self.client.clone();
         let status_sender_clone = self.status_sender.clone();
         
         // Create and spawn the ship actor
@@ -120,15 +121,15 @@ impl FleetCoordinator {
             actor.run().await;
         });
         
-        println!("🤖 Spawned actor for {}", ship_symbol);
+        o_info!("🤖 Spawned actor for {}", ship_symbol);
         Ok(())
     }
 
     /// Print comprehensive fleet status at start/end of cycles
     async fn print_fleet_status(&mut self, title: &str) -> Result<(), Box<dyn std::error::Error>> {
-        println!("\n═══════════════════════════════════════");
-        println!("🚢 {} FLEET STATUS", title);
-        println!("═══════════════════════════════════════");
+        o_summary!("\n═══════════════════════════════════════");
+        o_summary!("🚢 {} FLEET STATUS", title);
+        o_summary!("═══════════════════════════════════════");
         
         for (ship_symbol, state) in &self.ship_states {
             let ship = &state.ship;
@@ -162,34 +163,34 @@ impl FleetCoordinator {
                 }
             };
             
-            println!("🚢 {} ({})", ship_symbol, ship.registration.role);
-            println!("   📍 Location: {}", ship.nav.waypoint_symbol);
-            println!("   📦 Cargo: {}/{} units", ship.cargo.units, ship.cargo.capacity);
-            println!("   ⛽ Fuel: {}/{} units", ship.fuel.current, ship.fuel.capacity);
-            println!("   {} | {}", action_status, cooldown_status);
+            o_summary!("🚢 {} ({})", ship_symbol, ship.registration.role);
+            o_summary!("   📍 Location: {}", ship.nav.waypoint_symbol);
+            o_summary!("   📦 Cargo: {}/{} units", ship.cargo.units, ship.cargo.capacity);
+            o_summary!("   ⛽ Fuel: {}/{} units", ship.fuel.current, ship.fuel.capacity);
+            o_summary!("   {} | {}", action_status, cooldown_status);
             
             if ship.cargo.units > 0 {
                 let cargo_items: Vec<String> = ship.cargo.inventory.iter()
                     .map(|item| format!("{} x{}", item.symbol, item.units))
                     .collect();
-                println!("   📋 Inventory: {}", cargo_items.join(", "));
+                o_summary!("   📋 Inventory: {}", cargo_items.join(", "));
             }
             
             if let Some(plan) = &state.current_plan {
-                println!("   📋 Plan: {} steps, {} fuel needed", plan.steps.len(), plan.estimated_fuel_required);
+                o_summary!("   📋 Plan: {} steps, {} fuel needed", plan.steps.len(), plan.estimated_fuel_required);
             }
             
-            println!();
+            o_summary!("");
         }
         
         // Add contract status section
-        println!("📋 CONTRACT STATUS");
-        println!("═══════════════════════════════════════");
+        o_summary!("📋 CONTRACT STATUS");
+        o_summary!("═══════════════════════════════════════");
         
         match self.get_contract_status().await {
             Ok(contracts) => {
                 if contracts.is_empty() {
-                    println!("   📋 No active contracts");
+                    o_summary!("   📋 No active contracts");
                 } else {
                     for contract in contracts {
                         let status_icon = if contract.fulfilled {
@@ -208,7 +209,7 @@ impl FleetCoordinator {
                             "AVAILABLE"
                         };
                         
-                        println!("   {} {} [{}]", status_icon, contract.id, status_text);
+                        o_summary!("   {} {} [{}]", status_icon, contract.id, status_text);
                         
                         if contract.accepted && !contract.fulfilled {
                             // Show delivery progress
@@ -216,17 +217,17 @@ impl FleetCoordinator {
                                 let progress = (delivery.units_fulfilled as f64 / delivery.units_required as f64) * 100.0;
                                 let progress_bar = self.create_progress_bar(progress, 20);
                                 
-                                println!("      📦 {}: {}/{} units ({:.1}%) {}", 
+                                o_summary!("      📦 {}: {}/{} units ({:.1}%) {}", 
                                         delivery.trade_symbol,
                                         delivery.units_fulfilled,
                                         delivery.units_required,
                                         progress,
                                         progress_bar);
-                                println!("      📍 Deliver to: {}", delivery.destination_symbol);
+                                o_summary!("      📍 Deliver to: {}", delivery.destination_symbol);
                             }
                             
                             // Show payment info
-                            println!("      💰 Payment: {} credits (+ {} on completion)", 
+                            o_summary!("      💰 Payment: {} credits (+ {} on completion)", 
                                     contract.terms.payment.on_accepted,
                                     contract.terms.payment.on_fulfilled);
                                     
@@ -238,29 +239,29 @@ impl FleetCoordinator {
                                 if time_left > 0 {
                                     let days = time_left / 86400;
                                     let hours = (time_left % 86400) / 3600;
-                                    println!("      ⏰ Deadline: {}d {}h remaining", days, hours);
+                                    o_summary!("      ⏰ Deadline: {}d {}h remaining", days, hours);
                                 } else {
-                                    println!("      ⚠️ Deadline: EXPIRED");
+                                    o_error!("      ⚠️ Deadline: EXPIRED");
                                 }
                             }
                         }
                         
-                        println!();
+                        o_summary!("");
                     }
                 }
             }
             Err(e) => {
-                println!("   ⚠️ Failed to fetch contract status: {}", e);
+                o_error!("   ⚠️ Failed to fetch contract status: {}", e);
             }
         }
         
-        println!("═══════════════════════════════════════\n");
+        o_summary!("═══════════════════════════════════════\n");
         Ok(())
     }
 
     pub async fn run_autonomous_operations(&mut self, contract: &Contract) -> Result<(), Box<dyn std::error::Error>> {
-        println!("🎖️ Fleet Coordinator starting autonomous operations...");
-        println!("🎯 Contract: {} - Materials: {:?}", contract.id, 
+        o_summary!("🎖️ Fleet Coordinator starting autonomous operations...");
+        o_summary!("🎯 Contract: {} - Materials: {:?}", contract.id, 
                 contract.terms.deliver.iter().map(|d| &d.trade_symbol).collect::<Vec<_>>());
         
         // Start the main coordination loop
@@ -268,7 +269,7 @@ impl FleetCoordinator {
         
         loop {
             cycle_count += 1;
-            println!("\n🔄 ═══ COORDINATION CYCLE #{} ═══", cycle_count);
+            o_summary!("\n🔄 ═══ COORDINATION CYCLE #{} ═══", cycle_count);
             
             // Print fleet status at start of cycle
             self.print_fleet_status("START OF CYCLE").await?;
@@ -293,7 +294,7 @@ impl FleetCoordinator {
             
             // Check if contract is complete
             if self.is_contract_complete(contract).await? {
-                println!("🎉 Contract {} completed!", contract.id);
+                o_summary!("🎉 Contract {} completed!", contract.id);
                 break;
             }
         }
@@ -304,7 +305,7 @@ impl FleetCoordinator {
     async fn process_status_updates(&mut self) {
         // Process all pending status updates
         while let Ok((ship_symbol, new_state)) = self.status_receiver.try_recv() {
-            println!("📡 Status update from {}: {:?}", ship_symbol, new_state.status);
+            o_debug!("📡 Status update from {}: {:?}", ship_symbol, new_state.status);
             self.ship_states.insert(ship_symbol, new_state);
         }
     }
@@ -315,7 +316,7 @@ impl FleetCoordinator {
             .map(|d| d.trade_symbol.clone())
             .collect();
         
-        println!("🎯 Assigning tasks - needed materials: {:?}", needed_materials);
+        o_info!("🎯 Assigning tasks - needed materials: {:?}", needed_materials);
         
         // Get ships from cache (refresh stale ones)
         let cached_ships = self.ship_cache.list_cached_ships();
@@ -328,7 +329,7 @@ impl FleetCoordinator {
         }
         
         if ships.is_empty() {
-            println!("⚠️ No ships available in cache, fetching from API...");
+            o_error!("⚠️ No ships available in cache, fetching from API...");
             let api_ships = self.client.get_ships().await?;
             for ship in &api_ships {
                 self.ship_cache.cache_ship(ship.clone())?;
@@ -336,7 +337,7 @@ impl FleetCoordinator {
             ships = api_ships;
         }
         
-        println!("📊 Using {} ships ({} from cache)", ships.len(), self.ship_cache.list_cached_ships().len());
+        o_debug!("📊 Using {} ships ({} from cache)", ships.len(), self.ship_cache.list_cached_ships().len());
         
         // Analyze fleet performance and get prioritized metrics
         self.fleet_metrics = self.prioritizer.analyze_fleet_performance(&ships, contract).await?;
@@ -352,19 +353,19 @@ impl FleetCoordinator {
         let idle_ships = self.prioritizer.get_idle_ships(&self.fleet_metrics);
         
         if idle_ships.is_empty() {
-            println!("📊 All ships are busy. Current fleet status:");
+            o_info!("📊 All ships are busy. Current fleet status:");
             for metrics in &self.fleet_metrics {
-                println!("  🚢 {} - Priority: {:.2} - Status: {:?}", 
+                o_info!("  🚢 {} - Priority: {:.2} - Status: {:?}", 
                         metrics.ship_symbol, metrics.priority_weight, metrics.status);
             }
         } else {
-            println!("🎯 Assigning tasks to {} idle ships in priority order", idle_ships.len());
+            o_info!("🎯 Assigning tasks to {} idle ships in priority order", idle_ships.len());
             
             for ship_symbol in idle_ships {
                 if let Some(ship) = ships.iter().find(|s| s.symbol == ship_symbol) {
                     if let Some(metrics) = self.fleet_metrics.iter().find(|m| m.ship_symbol == ship_symbol) {
                         let recommended_task = self.prioritizer.recommend_optimal_task(metrics, contract);
-                        println!("🎖️ {} (Priority: {:.2}) -> {}", ship_symbol, metrics.priority_weight, recommended_task);
+                        o_debug!("🎖️ {} (Priority: {:.2}) -> {}", ship_symbol, metrics.priority_weight, recommended_task);
                         
                         // Priority-based task assignment
                         // Check if this is a probe/satellite first - they can't move and need special handling
@@ -375,29 +376,29 @@ impl FleetCoordinator {
                                 // TODO: Implement useful satellite functionality later
                                 continue;
                             } else {
-                                println!("🔭 {} is a probe - assigning exploration", ship_symbol);
+                                o_info!("🔭 {} is a probe - assigning exploration", ship_symbol);
                                 self.assign_exploration_task(&ship).await?;
                             }
                         } else if self.needs_refuel(&ship) {
-                            println!("⛽ {} needs fuel ({}/{})", ship_symbol, ship.fuel.current, ship.fuel.capacity);
+                            o_info!("⛽ {} needs fuel ({}/{})", ship_symbol, ship.fuel.current, ship.fuel.capacity);
                             self.assign_refuel_task(&ship).await?;
                         } else if self.should_deliver_cargo(&ship, contract) {
-                            println!("📦 {} ready for delivery - assigning cargo delivery", ship_symbol);
+                            o_info!("📦 {} ready for delivery - assigning cargo delivery", ship_symbol);
                             self.assign_delivery_task(&ship, contract).await?;
                         } else if self.is_cargo_full(&ship) {
-                            println!("🗃️ {} cargo full - need to manage inventory", ship_symbol);
+                            o_info!("🗃️ {} cargo full - need to manage inventory", ship_symbol);
                             self.assign_cargo_management(&ship, contract).await?;
                         } else if metrics.capabilities.can_mine && (metrics.contract_contribution >= 0.01 || ship.registration.role.contains("MINER") || ship.registration.role.contains("EXCAVATOR")) {
                             // Check if ship needs fuel before mining (more proactive than general refuel check)
                             if self.should_refuel_before_mining(&ship) {
-                                println!("⛽ {} needs fuel before mining ({}/{})", ship_symbol, ship.fuel.current, ship.fuel.capacity);
+                                o_info!("⛽ {} needs fuel before mining ({}/{})", ship_symbol, ship.fuel.current, ship.fuel.capacity);
                                 self.assign_refuel_task(&ship).await?;
                             } else {
-                                println!("⛏️ {} assigned to mining (priority: {:.2})", ship_symbol, metrics.priority_weight);
+                                o_info!("⛏️ {} assigned to mining (priority: {:.2})", ship_symbol, metrics.priority_weight);
                                 self.assign_mining_task(&ship, &needed_materials, &contract.id).await?;
                             }
                         } else if metrics.capabilities.can_trade {
-                            println!("🏪 {} assigned to support operations (trading ready)", ship_symbol);
+                            o_info!("🏪 {} assigned to support operations (trading ready)", ship_symbol);
                         }
                     }
                 }
@@ -456,17 +457,17 @@ impl FleetCoordinator {
         let significant_amount = contract_material_count as f64 / ship.cargo.capacity as f64 >= 0.75;
         
         if cargo_full {
-            println!("🗃️ {} cargo nearly full ({}/{}), should deliver", ship.symbol, ship.cargo.units, ship.cargo.capacity);
+            o_debug!("🗃️ {} cargo nearly full ({}/{}), should deliver", ship.symbol, ship.cargo.units, ship.cargo.capacity);
             true
         } else if can_fulfill_contract {
-            println!("🎯 {} has enough to fulfill contract ({} units), should deliver", ship.symbol, contract_material_count);
+            o_debug!("🎯 {} has enough to fulfill contract ({} units), should deliver", ship.symbol, contract_material_count);
             true
         } else if significant_amount {
-            println!("📦 {} has significant contract materials ({} units = {:.1}%), should deliver", 
+            o_debug!("📦 {} has significant contract materials ({} units = {:.1}%), should deliver", 
                     ship.symbol, contract_material_count, (contract_material_count as f64 / ship.cargo.capacity as f64) * 100.0);
             true
         } else {
-            println!("⏳ {} should continue mining ({} contract materials, {}/{})", 
+            o_debug!("⏳ {} should continue mining ({} contract materials, {}/{})", 
                     ship.symbol, contract_material_count, ship.cargo.units, ship.cargo.capacity);
             false
         }
@@ -481,8 +482,8 @@ impl FleetCoordinator {
         
         // Determine what deposit type we need based on the materials
         let needed_deposit_trait = Self::determine_needed_deposit_type(needed_materials);
-        println!("🎯 CONTRACT ANALYSIS: Need materials {:?}", needed_materials);
-        println!("   📋 DEPOSIT REQUIREMENT: Looking for asteroids with {}", needed_deposit_trait);
+        o_debug!("🎯 CONTRACT ANALYSIS: Need materials {:?}", needed_materials);
+        o_debug!("   📋 DEPOSIT REQUIREMENT: Looking for asteroids with {}", needed_deposit_trait);
         
         // Show the logic behind deposit selection
         let material_category = if needed_materials.iter().any(|m| ["IRON_ORE", "COPPER_ORE", "ALUMINUM_ORE", "GOLD_ORE", "PLATINUM_ORE", "SILVER_ORE", "URANIUM_ORE", "TITANIUM_ORE", "ZINC_ORE"].contains(&m.as_str())) {
@@ -494,7 +495,7 @@ impl FleetCoordinator {
         } else {
             "unknown materials"
         };
-        println!("   🧭 LOGIC: {} are {} → target deposit type: {}", needed_materials.join(", "), material_category, needed_deposit_trait);
+        o_debug!("   🧭 LOGIC: {} are {} → target deposit type: {}", needed_materials.join(", "), material_category, needed_deposit_trait);
         
         // Find asteroids with the right deposit type
         let suitable_asteroids: Vec<_> = waypoints.into_iter()
@@ -506,7 +507,7 @@ impl FleetCoordinator {
         
         // Filter asteroids by fuel safety - check if ship can reach them
         let total_suitable = suitable_asteroids.len();
-        println!("🔍 Checking fuel safety for {} potential mining targets", total_suitable);
+        o_debug!("🔍 Checking fuel safety for {} potential mining targets", total_suitable);
         let mut fuel_safe_asteroids = Vec::new();
         
         for asteroid in suitable_asteroids {
@@ -516,14 +517,14 @@ impl FleetCoordinator {
             match nav_planner.can_navigate_safely(ship, &asteroid.symbol).await {
                 Ok(safety_check) => {
                     if safety_check.is_safe {
-                        println!("✅ {} is fuel-safe: {}", asteroid.symbol, safety_check.reason);
+                        o_debug!("✅ {} is fuel-safe: {}", asteroid.symbol, safety_check.reason);
                         fuel_safe_asteroids.push(asteroid);
                     } else {
-                        println!("⛽ {} is too far: {}", asteroid.symbol, safety_check.reason);
+                        o_debug!("⛽ {} is too far: {}", asteroid.symbol, safety_check.reason);
                     }
                 }
                 Err(e) => {
-                    println!("⚠️ {} fuel check failed: {}", asteroid.symbol, e);
+                    o_error!("⚠️ {} fuel check failed: {}", asteroid.symbol, e);
                     
                     // Fallback: Basic distance-based fuel estimation when API fails
                     let ship_coords = (ship.nav.route.origin.x, ship.nav.route.origin.y);
@@ -534,11 +535,11 @@ impl FleetCoordinator {
                     let fuel_with_safety = estimated_fuel_needed + 10; // Add 10 fuel safety buffer
                     
                     if ship.fuel.current >= fuel_with_safety {
-                        println!("✅ {} passes fallback fuel check: {} fuel available, ~{} estimated needed", 
+                        o_debug!("✅ {} passes fallback fuel check: {} fuel available, ~{} estimated needed", 
                                 asteroid.symbol, ship.fuel.current, fuel_with_safety);
                         fuel_safe_asteroids.push(asteroid);
                     } else {
-                        println!("❌ {} fails fallback fuel check: {} fuel available, ~{} estimated needed", 
+                        o_debug!("❌ {} fails fallback fuel check: {} fuel available, ~{} estimated needed", 
                                 asteroid.symbol, ship.fuel.current, fuel_with_safety);
                     }
                 }
@@ -562,14 +563,14 @@ impl FleetCoordinator {
             let has_marketplace = target.traits.iter().any(|t| t.symbol == "MARKETPLACE");
             let has_fuel = target.traits.iter().any(|t| t.symbol == "FUEL_STATION");
             
-            println!("⛏️ Assigning {} to mine at {} ({})", ship.symbol, target.symbol, target.waypoint_type);
-            println!("   🎯 REASON: Need {:?} → requires {} → this asteroid has it", needed_materials, needed_deposit_trait);
-            println!("   💎 Deposit types: {:?}", deposit_types);
-            println!("   📊 Selection score: {} {}{}", score, 
+            o_info!("⛏️ Assigning {} to mine at {} ({})", ship.symbol, target.symbol, target.waypoint_type);
+            o_debug!("   🎯 REASON: Need {:?} → requires {} → this asteroid has it", needed_materials, needed_deposit_trait);
+            o_debug!("   💎 Deposit types: {:?}", deposit_types);
+            o_debug!("   📊 Selection score: {} {}{}", score, 
                     if has_marketplace { "🏪" } else { "" },
                     if has_fuel { "⛽" } else { "" });
             if score > 0 {
-                println!("   ⭐ PRIORITY: {}", 
+                o_debug!("   ⭐ PRIORITY: {}", 
                     if score >= 1100 { "Engineered asteroid with marketplace - optimal!" }
                     else if score >= 200 { "Has fuel station - convenient refueling" }
                     else if score >= 100 { "Engineered asteroid - better yields" }
@@ -585,17 +586,17 @@ impl FleetCoordinator {
             self.send_action_to_ship(&ship.symbol, mining_action).await?;
         } else {
             let total_fuel_safe = fuel_safe_asteroids.len();
-            println!("⚠️ No fuel-safe mining locations found for {} (need deposit type: {})", ship.symbol, needed_deposit_trait);
-            println!("   📊 Analysis summary:");
-            println!("     • Suitable deposit type: {} asteroids", total_suitable);
-            println!("     • Fuel-safe: {} asteroids", total_fuel_safe);
-            println!("   Available asteroids:");
+            o_error!("⚠️ No fuel-safe mining locations found for {} (need deposit type: {})", ship.symbol, needed_deposit_trait);
+            o_debug!("   📊 Analysis summary:");
+            o_debug!("     • Suitable deposit type: {} asteroids", total_suitable);
+            o_debug!("     • Fuel-safe: {} asteroids", total_fuel_safe);
+            o_debug!("   Available asteroids:");
             for waypoint in waypoints.iter().filter(|w| w.waypoint_type == "ASTEROID" || w.waypoint_type == "ENGINEERED_ASTEROID") {
                 let deposits: Vec<String> = waypoint.traits.iter()
                     .filter(|t| t.symbol.contains("DEPOSIT"))
                     .map(|t| t.symbol.clone())
                     .collect();
-                println!("     • {} - {:?}", waypoint.symbol, deposits);
+                o_debug!("     • {} - {:?}", waypoint.symbol, deposits);
             }
         }
         
@@ -665,7 +666,7 @@ impl FleetCoordinator {
     }
 
     async fn assign_exploration_task(&mut self, ship: &Ship) -> Result<(), Box<dyn std::error::Error>> {
-        println!("🛰️ Assigning {} to explore for shipyards", ship.symbol);
+        o_info!("🛰️ Assigning {} to explore for shipyards", ship.symbol);
         
         let system_symbol = ship.nav.waypoint_symbol.split('-').take(2).collect::<Vec<&str>>().join("-");
         let systems_to_explore = vec![system_symbol];
@@ -686,7 +687,7 @@ impl FleetCoordinator {
                 let units_to_deliver = std::cmp::min(cargo_item.units, delivery.units_required - delivery.units_fulfilled);
                 
                 if units_to_deliver > 0 {
-                    println!("📦 Assigning {} to deliver {} x{} to {}", 
+                    o_info!("📦 Assigning {} to deliver {} x{} to {}", 
                             ship.symbol, delivery.trade_symbol, units_to_deliver, delivery.destination_symbol);
                     
                     // Send delivery action - it will handle navigation automatically
@@ -711,7 +712,7 @@ impl FleetCoordinator {
         if let Some(ship_state) = self.ship_states.get(ship_symbol) {
             match self.task_planner.create_plan(&action, &ship_state.ship).await {
                 Ok(plan) => {
-                    println!("📋 {} task plan: {} steps, {} fuel needed", 
+                    o_debug!("📋 {} task plan: {} steps, {} fuel needed", 
                             ship_symbol, plan.steps.len(), plan.estimated_fuel_required);
                     
                     // Update ship state with the plan
@@ -721,7 +722,7 @@ impl FleetCoordinator {
                     }
                 },
                 Err(e) => {
-                    println!("⚠️ Failed to create task plan for {}: {}", ship_symbol, e);
+                    o_error!("⚠️ Failed to create task plan for {}: {}", ship_symbol, e);
                     // Continue without a plan
                     if let Some(state) = self.ship_states.get_mut(ship_symbol) {
                         state.current_action = Some(action.clone());
@@ -735,7 +736,7 @@ impl FleetCoordinator {
             // Mark ship state as stale since we're sending it an action
             let action_description = format!("{:?}", action);
             if let Err(e) = self.ship_cache.mark_ship_action(ship_symbol, &action_description) {
-                println!("⚠️ Failed to mark ship as stale: {}", e);
+                o_error!("⚠️ Failed to mark ship as stale: {}", e);
             }
             
             sender.send(action)
@@ -758,7 +759,7 @@ impl FleetCoordinator {
     }
 
     pub fn print_fleet_summary(&self) {
-        println!("\n📊 FLEET STATUS:");
+        o_summary!("\n📊 FLEET STATUS:");
         self.ship_cache.print_cache_status();
         
         for (ship_symbol, state) in &self.ship_states {
@@ -773,7 +774,7 @@ impl FleetCoordinator {
                     "❌ NOT CACHED"
                 };
                 
-                println!("  🚢 {} (Priority: {:.2}) [{}]: {:?} - Contract: {:.1}% - Income: {:.0}/hr", 
+                o_info!("  🚢 {} (Priority: {:.2}) [{}]: {:?} - Contract: {:.1}% - Income: {:.0}/hr", 
                         ship_symbol, 
                         metrics.priority_weight,
                         cache_info,
@@ -781,7 +782,7 @@ impl FleetCoordinator {
                         metrics.contract_contribution * 100.0,
                         metrics.income_generation);
             } else {
-                println!("  🚢 {}: {:?}", ship_symbol, state.status);
+                o_info!("  🚢 {}: {:?}", ship_symbol, state.status);
             }
         }
     }
@@ -794,7 +795,7 @@ impl FleetCoordinator {
         if let (Some(cached_contracts), Some(timestamp)) = (&self.cached_contracts, self.contract_cache_timestamp) {
             if let Ok(elapsed) = timestamp.elapsed() {
                 if elapsed.as_secs() < cache_duration_secs {
-                    println!("📋 Using cached contract data ({:.1}s old)", elapsed.as_secs_f32());
+                    o_debug!("📋 Using cached contract data ({:.1}s old)", elapsed.as_secs_f32());
                     return Ok(cached_contracts.clone());
                 }
             }
@@ -803,7 +804,7 @@ impl FleetCoordinator {
         // Try to fetch fresh data
         match self.client.get_contracts().await {
             Ok(contracts) => {
-                println!("📋 Fetched fresh contract data from API");
+                o_info!("📋 Fetched fresh contract data from API");
                 // Update cache
                 self.cached_contracts = Some(contracts.clone());
                 self.contract_cache_timestamp = Some(SystemTime::now());
@@ -819,10 +820,10 @@ impl FleetCoordinator {
                             .map(|d| format!("{:.1}s", d.as_secs_f32()))
                             .unwrap_or_else(|| "unknown age".to_string());
                             
-                        println!("⚠️ Rate limited (429) - using cached contract data ({})", age);
+                        o_error!("⚠️ Rate limited (429) - using cached contract data ({})", age);
                         return Ok(cached_contracts.clone());
                     } else {
-                        println!("❌ Rate limited and no cached contract data available");
+                        o_error!("❌ Rate limited and no cached contract data available");
                         return Err(format!("Rate limited and no cached data: {}", e).into());
                     }
                 } else {
@@ -833,7 +834,7 @@ impl FleetCoordinator {
                             .map(|d| format!("{:.1}s", d.as_secs_f32()))
                             .unwrap_or_else(|| "unknown age".to_string());
                             
-                        println!("⚠️ API error - using cached contract data ({}): {}", age, e);
+                        o_error!("⚠️ API error - using cached contract data ({}): {}", age, e);
                         return Ok(cached_contracts.clone());
                     }
                 }
@@ -900,7 +901,7 @@ impl FleetCoordinator {
     async fn assign_refuel_task(&mut self, ship: &Ship) -> Result<(), Box<dyn std::error::Error>> {
         // Find nearest station with fuel
         let refuel_station = self.find_nearest_refuel_station(ship).await?;
-        println!("⛽ {} assigned to refuel at {} (closest available)", ship.symbol, refuel_station);
+        o_info!("⛽ {} assigned to refuel at {} (closest available)", ship.symbol, refuel_station);
         
         let action = ShipAction::Refuel {
             station: refuel_station
@@ -919,7 +920,7 @@ impl FleetCoordinator {
             Some(station) => Ok(station),
             None => {
                 // Fallback to agent's headquarters if no fuel stations found
-                println!("⚠️ No fuel stations found in {}, using agent headquarters as fallback", system_symbol);
+                o_error!("⚠️ No fuel stations found in {}, using agent headquarters as fallback", system_symbol);
                 let agent = self.client.get_agent().await?;
                 Ok(agent.headquarters)
             }
@@ -927,7 +928,7 @@ impl FleetCoordinator {
     }
 
     async fn assign_cargo_management(&mut self, ship: &Ship, contract: &Contract) -> Result<(), Box<dyn std::error::Error>> {
-        println!("🗃️ {} cargo management - analyzing full cargo hold", ship.symbol);
+        o_info!("🗃️ {} cargo management - analyzing full cargo hold", ship.symbol);
         
         let contract_materials: Vec<String> = contract.terms.deliver
             .iter()
@@ -941,10 +942,10 @@ impl FleetCoordinator {
         for item in &ship.cargo.inventory {
             if contract_materials.contains(&item.symbol) {
                 contract_items.push(item);
-                println!("   🎯 Contract: {} x{}", item.symbol, item.units);
+                o_debug!("   🎯 Contract: {} x{}", item.symbol, item.units);
             } else {
                 sellable_items.push(item);
-                println!("   💰 Sellable: {} x{}", item.symbol, item.units);
+                o_debug!("   💰 Sellable: {} x{}", item.symbol, item.units);
             }
         }
 
@@ -952,22 +953,22 @@ impl FleetCoordinator {
         if !contract_items.is_empty() {
             // Deliver contract items first if we have enough or cargo is very full
             if self.should_deliver_cargo(ship, contract) {
-                println!("📦 {} delivering contract materials first", ship.symbol);
+                o_info!("📦 {} delivering contract materials first", ship.symbol);
                 return self.assign_delivery_task(ship, contract).await;
             }
         }
         
         if !sellable_items.is_empty() {
             // Try to sell non-contract items to make room
-            println!("💰 {} attempting to sell non-contract cargo", ship.symbol);
+            o_info!("💰 {} attempting to sell non-contract cargo", ship.symbol);
             self.assign_smart_sell_or_jettison(ship, &sellable_items, &contract_materials).await
         } else if !contract_items.is_empty() {
             // Only contract items - deliver them
-            println!("📦 {} only has contract items - delivering", ship.symbol);
+            o_info!("📦 {} only has contract items - delivering", ship.symbol);
             self.assign_delivery_task(ship, contract).await
         } else {
             // Empty cargo (should not happen) - return to mining
-            println!("⚠️ {} empty cargo - return to mining", ship.symbol);
+            o_error!("⚠️ {} empty cargo - return to mining", ship.symbol);
             let needed_materials: Vec<String> = contract.terms.deliver
                 .iter()
                 .map(|d| d.trade_symbol.clone())
@@ -981,7 +982,7 @@ impl FleetCoordinator {
         // Find best marketplace that can actually buy our cargo
         match self.find_best_marketplace_for_cargo(ship, sellable_items).await {
             Ok(marketplace) => {
-                println!("🏪 {} will sell at {} (compatible market)", ship.symbol, marketplace);
+                o_info!("🏪 {} will sell at {} (compatible market)", ship.symbol, marketplace);
                 
                 // Create smart sell action that includes jettison fallback
                 let action = ShipAction::SmartSellOrJettison {
@@ -992,7 +993,7 @@ impl FleetCoordinator {
                 self.send_action_to_ship(&ship.symbol, action).await
             }
             Err(e) => {
-                println!("⚠️ {} no marketplace found ({}), will jettison directly", ship.symbol, e);
+                o_error!("⚠️ {} no marketplace found ({}), will jettison directly", ship.symbol, e);
                 
                 // No marketplace available - jettison directly
                 let action = ShipAction::JettisonCargo {
@@ -1009,7 +1010,7 @@ impl FleetCoordinator {
     async fn get_system_waypoints_cached(&mut self, system_symbol: &str) -> Result<&Vec<Waypoint>, Box<dyn std::error::Error>> {
         // Check if we need to scan the system
         if self.survey_cache.should_scan_system(system_symbol) {
-            println!("📡 Scanning system {} (not in cache or stale)", system_symbol);
+            o_info!("📡 Scanning system {} (not in cache or stale)", system_symbol);
             let waypoints = self.client.get_system_waypoints(system_symbol, None).await?;
             self.survey_cache.cache_system_waypoints(system_symbol, waypoints)?;
         }
@@ -1050,7 +1051,7 @@ impl FleetCoordinator {
                         if let Some(waypoint) = self.survey_cache.find_nearest_waypoint_with_trait(
                             system_symbol, trait_symbol, from_x, from_y
                         ) {
-                            println!("📋 Found {} in cache: {}", trait_symbol, waypoint.symbol);
+                            o_debug!("📋 Found {} in cache: {}", trait_symbol, waypoint.symbol);
                             return Ok(Some(waypoint.symbol.clone()));
                         }
                     }
@@ -1059,7 +1060,7 @@ impl FleetCoordinator {
         }
         
         // 2. Cache miss or stale - scan for fresh data
-        println!("🔍 Cache miss for {}, scanning for waypoints with traits: {:?}", system_symbol, trait_symbols);
+        o_debug!("🔍 Cache miss for {}, scanning for waypoints with traits: {:?}", system_symbol, trait_symbols);
         let waypoints = self.scan_and_cache_waypoints(system_symbol, scanning_ship_symbol).await?;
         
         // 3. Find nearest waypoint with requested traits from fresh data
@@ -1086,11 +1087,11 @@ impl FleetCoordinator {
                 .filter(|t| trait_symbols.contains(&t.symbol.as_str()))
                 .map(|t| &t.symbol)
                 .collect();
-            println!("🏪 Found nearest waypoint with traits {:?}: {} (distance: {:.1})", 
+            o_info!("🏪 Found nearest waypoint with traits {:?}: {} (distance: {:.1})", 
                     trait_names, waypoint.symbol, min_distance);
             Ok(Some(waypoint.symbol.clone()))
         } else {
-            println!("❌ No waypoints with traits {:?} found in {}", trait_symbols, system_symbol);
+            o_error!("❌ No waypoints with traits {:?} found in {}", trait_symbols, system_symbol);
             Ok(None)
         }
     }
@@ -1108,7 +1109,7 @@ impl FleetCoordinator {
     /// Scan waypoints for detailed trait data and cache the results
     /// This ensures we get full trait information including MARKETPLACE
     async fn scan_and_cache_waypoints(&mut self, system_symbol: &str, scanning_ship: &str) -> Result<Vec<crate::models::Waypoint>, Box<dyn std::error::Error>> {
-        println!("🔬 {} scanning waypoints in {} for detailed trait data", scanning_ship, system_symbol);
+        o_info!("🔬 {} scanning waypoints in {} for detailed trait data", scanning_ship, system_symbol);
         
         // Use the scanning API to get full waypoint data with traits
         let scanned_waypoints = self.client.scan_waypoints(scanning_ship).await?;
@@ -1130,7 +1131,7 @@ impl FleetCoordinator {
         
         // Validate scanned data quality
         let waypoints_with_traits = waypoints.iter().filter(|w| !w.traits.is_empty()).count();
-        println!("📊 Scanned {} waypoints, {} have trait data", waypoints.len(), waypoints_with_traits);
+        o_debug!("📊 Scanned {} waypoints, {} have trait data", waypoints.len(), waypoints_with_traits);
         
         // Cache the waypoint data
         self.survey_cache.cache_system_waypoints(system_symbol, waypoints.clone())?;
@@ -1139,7 +1140,7 @@ impl FleetCoordinator {
             w.traits.iter().any(|t| t.symbol == "MARKETPLACE")
         ).count();
         
-        println!("📡 Scanned {} waypoints in {}, found {} with MARKETPLACE trait", 
+        o_info!("📡 Scanned {} waypoints in {}, found {} with MARKETPLACE trait", 
                 waypoints.len(), system_symbol, marketplace_count);
         
         Ok(waypoints)
@@ -1168,7 +1169,7 @@ impl FleetCoordinator {
             .map(|item| item.symbol.as_str())
             .collect();
         
-        println!("🔍 {} checking {} marketplaces for compatibility with cargo: {:?}", 
+        o_debug!("🔍 {} checking {} marketplaces for compatibility with cargo: {:?}", 
                 ship.symbol, marketplaces.len(), cargo_symbols);
         
         let mut best_market = None;
@@ -1192,7 +1193,7 @@ impl FleetCoordinator {
                         }
                     }
                     
-                    println!("   📊 {}: can buy {}/{} items {:?}", 
+                    o_debug!("   📊 {}: can buy {}/{} items {:?}", 
                             marketplace_waypoint.symbol, 
                             compatibility_score, 
                             cargo_symbols.len(),
@@ -1204,13 +1205,13 @@ impl FleetCoordinator {
                     }
                 }
                 Err(e) => {
-                    println!("   ⚠️ Failed to get market data for {}: {}", marketplace_waypoint.symbol, e);
+                    o_error!("   ⚠️ Failed to get market data for {}: {}", marketplace_waypoint.symbol, e);
                 }
             }
         }
         
         if let Some(market) = best_market {
-            println!("✅ {} found best market: {} (compatibility: {}/{})", 
+            o_info!("✅ {} found best market: {} (compatibility: {}/{})", 
                     ship.symbol, market, best_compatibility_score, cargo_symbols.len());
             Ok(market)
         } else {
@@ -1241,7 +1242,7 @@ impl FleetCoordinator {
         let current_ships = match self.client.get_ships().await {
             Ok(ships) => ships,
             Err(e) => {
-                println!("⚠️ Failed to check for new ships: {}", e);
+                o_error!("⚠️ Failed to check for new ships: {}", e);
                 return Ok(()); // Don't fail the main loop over this
             }
         };
@@ -1255,18 +1256,18 @@ impl FleetCoordinator {
         }
         
         if !new_ships.is_empty() {
-            println!("🔍 Discovered {} new ships not in fleet management:", new_ships.len());
+            o_summary!("🔍 Discovered {} new ships not in fleet management:", new_ships.len());
             for ship in new_ships {
-                println!("   🚢 Adding {} ({}) to active fleet", ship.symbol, ship.registration.role);
+                o_info!("   🚢 Adding {} ({}) to active fleet", ship.symbol, ship.registration.role);
                 
                 if let Err(e) = self.spawn_ship_actor(ship.clone()).await {
-                    println!("   ⚠️ Failed to spawn actor for {}: {}", ship.symbol, e);
+                    o_error!("   ⚠️ Failed to spawn actor for {}: {}", ship.symbol, e);
                 } else {
                     // Cache the ship state
                     if let Err(e) = self.ship_cache.cache_ship(ship.clone()) {
-                        println!("   ⚠️ Failed to cache ship {}: {}", ship.symbol, e);
+                        o_error!("   ⚠️ Failed to cache ship {}: {}", ship.symbol, e);
                     }
-                    println!("   ✅ {} now under fleet management", ship.symbol);
+                    o_info!("   ✅ {} now under fleet management", ship.symbol);
                 }
             }
         }
@@ -1292,7 +1293,7 @@ impl FleetCoordinator {
             *last_check = Some(Instant::now());
         }
         
-        println!("🏗️ Checking fleet expansion opportunities...");
+        o_info!("🏗️ Checking fleet expansion opportunities...");
         
         // Get current agent info to check credits
         let agent = self.client.get_agent().await?;
@@ -1303,41 +1304,41 @@ impl FleetCoordinator {
             .filter(|s| s.mounts.iter().any(|m| m.symbol.contains("MINING")))
             .collect();
         
-        println!("📊 Current fleet: {} ships ({} miners)", current_ships.len(), mining_ships.len());
-        println!("💰 Available credits: {}", agent.credits);
+        o_debug!("📊 Current fleet: {} ships ({} miners)", current_ships.len(), mining_ships.len());
+        o_debug!("💰 Available credits: {}", agent.credits);
         
         // Check if we should buy another mining ship
         let should_expand = self.should_expand_fleet(&agent, &current_ships, contract).await;
         
         if should_expand && agent.credits >= self.config.fleet.min_credits_for_ship_purchase {
-            println!("🎯 Fleet expansion recommended - searching for shipyards...");
+            o_info!("🎯 Fleet expansion recommended - searching for shipyards...");
             
             // Try to find and purchase a ship
             match self.attempt_ship_purchase(&agent, &mining_ships).await {
                 Ok(new_ship) => {
-                    println!("🎉 Successfully purchased new ship: {}", new_ship.symbol);
-                    println!("   🚢 Type: {} Frame: {}", new_ship.registration.role, new_ship.frame.symbol);
-                    println!("   ⛏️ Ready for mining operations!");
+                    o_summary!("🎉 Successfully purchased new ship: {}", new_ship.symbol);
+                    o_info!("   🚢 Type: {} Frame: {}", new_ship.registration.role, new_ship.frame.symbol);
+                    o_info!("   ⛏️ Ready for mining operations!");
                     
                     // CRITICAL: Add the new ship to the fleet by spawning its actor
                     if let Err(e) = self.spawn_ship_actor(new_ship.clone()).await {
-                        println!("⚠️ Failed to add new ship to fleet: {}", e);
-                        println!("   💡 Ship purchased but won't be active until next restart");
+                        o_error!("⚠️ Failed to add new ship to fleet: {}", e);
+                        o_info!("   💡 Ship purchased but won't be active until next restart");
                     } else {
-                        println!("✅ New ship {} added to active fleet management", new_ship.symbol);
+                        o_summary!("✅ New ship {} added to active fleet management", new_ship.symbol);
                         // Cache the new ship state
                         if let Err(e) = self.ship_cache.cache_ship(new_ship) {
-                            println!("⚠️ Failed to cache new ship state: {}", e);
+                            o_error!("⚠️ Failed to cache new ship state: {}", e);
                         }
                     }
                 }
                 Err(e) => {
-                    println!("⚠️ Ship purchase failed: {}", e);
+                    o_error!("⚠️ Ship purchase failed: {}", e);
                 }
             }
         } else if should_expand {
             let needed = self.config.fleet.min_credits_for_ship_purchase - agent.credits;
-            println!("💸 Want to expand fleet but need {} more credits", needed);
+            o_info!("💸 Want to expand fleet but need {} more credits", needed);
         }
         
         Ok(())
@@ -1363,18 +1364,18 @@ impl FleetCoordinator {
         let profitable = contract_value > self.config.credits.min_profitable_contract;
         
         if has_credits && contract_is_large && not_too_many_ships && profitable {
-            println!("✅ Fleet expansion criteria met:");
-            println!("   💰 Credits: {} >= {}", agent.credits, self.config.fleet.min_credits_for_ship_purchase);
-            println!("   📦 Contract size: {} units", total_contract_units);
-            println!("   💎 Contract value: {} credits", contract_value);
-            println!("   🚢 Current miners: {}/{}", mining_ships, self.config.fleet.max_mining_ships);
+            o_info!("✅ Fleet expansion criteria met:");
+            o_info!("   💰 Credits: {} >= {}", agent.credits, self.config.fleet.min_credits_for_ship_purchase);
+            o_info!("   📦 Contract size: {} units", total_contract_units);
+            o_info!("   💎 Contract value: {} credits", contract_value);
+            o_info!("   🚢 Current miners: {}/{}", mining_ships, self.config.fleet.max_mining_ships);
             true
         } else {
-            println!("❌ Fleet expansion not recommended:");
-            if !has_credits { println!("   💸 Need more credits ({} < {})", agent.credits, self.config.fleet.min_credits_for_ship_purchase); }
-            if !contract_is_large { println!("   📦 Contract too small ({} units, {} value)", total_contract_units, contract_value); }
-            if !not_too_many_ships { println!("   🚢 Already have enough miners ({})", mining_ships); }
-            if !profitable { println!("   💎 Contract not profitable enough ({} < {})", contract_value, self.config.credits.min_profitable_contract); }
+            o_debug!("❌ Fleet expansion not recommended:");
+            if !has_credits { o_debug!("   💸 Need more credits ({} < {})", agent.credits, self.config.fleet.min_credits_for_ship_purchase); }
+            if !contract_is_large { o_debug!("   📦 Contract too small ({} units, {} value)", total_contract_units, contract_value); }
+            if !not_too_many_ships { o_debug!("   🚢 Already have enough miners ({})", mining_ships); }
+            if !profitable { o_debug!("   💎 Contract not profitable enough ({} < {})", contract_value, self.config.credits.min_profitable_contract); }
             false
         }
     }
@@ -1397,20 +1398,20 @@ impl FleetCoordinator {
         
         // Try each shipyard until we find one with suitable ships
         for shipyard in shipyards {
-            println!("🏭 Checking shipyard at {}", shipyard.waypoint_symbol);
+            o_info!("🏭 Checking shipyard at {}", shipyard.waypoint_symbol);
             
             match shipyard_ops.purchase_mining_ship(&shipyard, reference_ship).await {
                 Ok(new_ship) => {
                     // Attempt to outfit the ship (may not have all required APIs yet)
                     if let Err(e) = shipyard_ops.outfit_mining_ship(&new_ship, reference_ship).await {
-                        println!("⚠️ Ship outfitting incomplete: {}", e);
-                        println!("   💡 Ship can still be used for basic mining");
+                        o_info!("⚠️ Ship outfitting incomplete: {}", e);
+                        o_info!("   💡 Ship can still be used for basic mining");
                     }
                     
                     return Ok(new_ship);
                 }
                 Err(e) => {
-                    println!("   ❌ Purchase failed at {}: {}", shipyard.waypoint_symbol, e);
+                    o_error!("   ❌ Purchase failed at {}: {}", shipyard.waypoint_symbol, e);
                 }
             }
         }

@@ -1,5 +1,6 @@
 // Mining operations module
 use crate::client::SpaceTradersClient;
+use crate::{o_info};
 use crate::models::*;
 use tokio::time::{sleep, Duration};
 use std::collections::HashMap;
@@ -34,7 +35,7 @@ impl<'a> MiningOperations<'a> {
     }
 
     pub async fn find_asteroid_fields(&self, system_symbol: &str, needed_materials: &[String]) -> Result<Vec<Waypoint>, Box<dyn std::error::Error>> {
-        println!("🔍 Searching for asteroid fields that produce required materials in system {}...", system_symbol);
+        o_info!("🔍 Searching for asteroid fields that produce required materials in system {}...", system_symbol);
         
         let all_waypoints = self.client.get_system_waypoints(system_symbol, None).await?;
         let all_asteroids: Vec<Waypoint> = all_waypoints
@@ -43,18 +44,18 @@ impl<'a> MiningOperations<'a> {
                              waypoint.waypoint_type == "ENGINEERED_ASTEROID")
             .collect();
 
-        println!("📍 Found {} total asteroid field(s):", all_asteroids.len());
+        o_info!("📍 Found {} total asteroid field(s):", all_asteroids.len());
         
         // Score asteroid fields based on likelihood of containing needed materials
         let mut asteroid_scores: Vec<(Waypoint, i32)> = Vec::new();
         
         for asteroid in all_asteroids {
             let score = self.score_asteroid_for_materials(&asteroid, needed_materials);
-            println!("  - {} at ({}, {})", asteroid.symbol, asteroid.x, asteroid.y);
-            println!("    Likely produces: {:?}", needed_materials);
+            o_info!("  - {} at ({}, {})", asteroid.symbol, asteroid.x, asteroid.y);
+            o_info!("    Likely produces: {:?}", needed_materials);
             
             if score > 50 {
-                println!("  🎯 {} shows high material potential!", asteroid.symbol);
+                o_info!("  🎯 {} shows high material potential!", asteroid.symbol);
             }
             
             asteroid_scores.push((asteroid, score));
@@ -65,8 +66,8 @@ impl<'a> MiningOperations<'a> {
         
         if !asteroid_scores.is_empty() {
             let best = &asteroid_scores[0];
-            println!("🎯 Selected target: {} (priority score: {})", best.0.symbol, best.1);
-            println!("  ✅ High likelihood of containing required contract materials!");
+            o_info!("🎯 Selected target: {} (priority score: {})", best.0.symbol, best.1);
+            o_info!("  ✅ High likelihood of containing required contract materials!");
         }
         
         Ok(asteroid_scores.into_iter().map(|(waypoint, _)| waypoint).collect())
@@ -127,8 +128,8 @@ impl<'a> MiningOperations<'a> {
         contract: &Contract,
         max_cycles: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        println!("⛏️ Starting PARALLEL autonomous survey-based mining loop...");
-        println!("🚀 Coordinating {} ships across {} asteroid fields!", 
+        o_info!("⛏️ Starting PARALLEL autonomous survey-based mining loop...");
+        o_info!("🚀 Coordinating {} ships across {} asteroid fields!", 
                 ready_miners.len(),
                 ready_miners.iter()
                     .map(|(_, asteroid)| asteroid.symbol.as_str())
@@ -141,11 +142,11 @@ impl<'a> MiningOperations<'a> {
         
         while mining_cycles < max_cycles {
             mining_cycles += 1;
-            println!("\n🔄 PARALLEL Mining cycle {}/{} - {} ships operating simultaneously", 
+            o_info!("\n🔄 PARALLEL Mining cycle {}/{} - {} ships operating simultaneously", 
                     mining_cycles, max_cycles, ready_miners.len());
             
             // Phase 1: PARALLEL Survey creation for all ships
-            println!("🔍 Creating surveys for all mining ships...");
+            o_info!("🔍 Creating surveys for all mining ships...");
             
             for (ship, asteroid) in ready_miners {
                 let asteroid_surveys = fleet_surveys.entry(asteroid.symbol.clone()).or_insert(Vec::new());
@@ -156,10 +157,10 @@ impl<'a> MiningOperations<'a> {
                 });
                 
                 if needs_survey || asteroid_surveys.is_empty() {
-                    println!("  🔍 {} surveying {}...", ship.symbol, asteroid.symbol);
+                    o_info!("  🔍 {} surveying {}...", ship.symbol, asteroid.symbol);
                     match self.create_survey(&ship.symbol).await {
                         Ok(survey_data) => {
-                            println!("    ✅ {} found {} deposit locations", ship.symbol, survey_data.surveys.len());
+                            o_info!("    ✅ {} found {} deposit locations", ship.symbol, survey_data.surveys.len());
                             
                             for survey in &survey_data.surveys {
                                 let contract_deposits: Vec<_> = survey.deposits.iter()
@@ -167,7 +168,7 @@ impl<'a> MiningOperations<'a> {
                                     .collect();
                                 
                                 if !contract_deposits.is_empty() {
-                                    println!("      🎯 Survey {}: Contract materials found! {:?}", 
+                                    o_info!("      🎯 Survey {}: Contract materials found! {:?}", 
                                             survey.signature,
                                             contract_deposits.iter().map(|d| &d.symbol).collect::<Vec<_>>());
                                 }
@@ -181,18 +182,18 @@ impl<'a> MiningOperations<'a> {
                             }
                         }
                         Err(e) => {
-                            println!("    ⚠️ {} survey failed: {}", ship.symbol, e);
+                            o_info!("    ⚠️ {} survey failed: {}", ship.symbol, e);
                         }
                     }
                 }
             }
             
             // Phase 2: PARALLEL Extraction for all ships
-            println!("⛏️ Executing parallel extraction across fleet...");
+            o_info!("⛏️ Executing parallel extraction across fleet...");
             _max_cooldown_seconds = 0.0; // Reset for this cycle
             
             for (ship, asteroid) in ready_miners {
-                println!("  ⛏️ {} extracting at {}...", ship.symbol, asteroid.symbol);
+                o_info!("  ⛏️ {} extracting at {}...", ship.symbol, asteroid.symbol);
                 
                 // Find best survey for this asteroid
                 let empty_surveys = Vec::new();
@@ -203,10 +204,10 @@ impl<'a> MiningOperations<'a> {
                 
                 // Execute extraction (targeted or random)
                 let extraction_result = if let Some(survey) = target_survey {
-                    println!("    🎯 Using targeted survey {} for {}", survey.signature, ship.symbol);
+                    o_info!("    🎯 Using targeted survey {} for {}", survey.signature, ship.symbol);
                     self.extract_with_survey(&ship.symbol, survey).await
                 } else {
-                    println!("    🎲 Random extraction for {}", ship.symbol);
+                    o_info!("    🎲 Random extraction for {}", ship.symbol);
                     self.extract_resources(&ship.symbol).await
                 };
                 
@@ -215,18 +216,18 @@ impl<'a> MiningOperations<'a> {
                         let yield_info = &extraction_data.extraction.extraction_yield;
                         let cooldown_seconds = extraction_data.cooldown.remaining_seconds;
                         
-                        println!("    ✅ {} extracted: {} x{} (Cargo: {}/{})",
+                        o_info!("    ✅ {} extracted: {} x{} (Cargo: {}/{})",
                                 ship.symbol, yield_info.symbol, yield_info.units,
                                 extraction_data.cargo.units, extraction_data.cargo.capacity);
                         
                         if cooldown_seconds > 0.0 {
-                            println!("      ⏳ {} cooldown: {:.1} seconds", ship.symbol, cooldown_seconds);
+                            o_info!("      ⏳ {} cooldown: {:.1} seconds", ship.symbol, cooldown_seconds);
                             _max_cooldown_seconds = _max_cooldown_seconds.max(cooldown_seconds);
                         }
                         
                         // Check contract progress
                         if needed_materials.contains(&yield_info.symbol) {
-                            println!("      🎯 {} found CONTRACT MATERIAL: {}! ✨", ship.symbol, yield_info.symbol);
+                            o_info!("      🎯 {} found CONTRACT MATERIAL: {}! ✨", ship.symbol, yield_info.symbol);
                             
                             let current_amount = extraction_data.cargo.inventory.iter()
                                 .find(|item| item.symbol == yield_info.symbol)
@@ -238,24 +239,24 @@ impl<'a> MiningOperations<'a> {
                                 .map(|delivery| delivery.units_required)
                                 .unwrap_or(0);
                             
-                            println!("      📈 {} progress: {}/{} {}",
+                            o_info!("      📈 {} progress: {}/{} {}",
                                     ship.symbol, current_amount, needed_amount, yield_info.symbol);
                         }
                         
                         // Check if ship cargo is full
                         if extraction_data.cargo.units >= extraction_data.cargo.capacity {
-                            println!("      📦 {} cargo full! Ready for delivery.", ship.symbol);
+                            o_info!("      📦 {} cargo full! Ready for delivery.", ship.symbol);
                         }
                     }
                     Err(e) => {
-                        println!("    ❌ {} extraction failed: {}", ship.symbol, e);
+                        o_info!("    ❌ {} extraction failed: {}", ship.symbol, e);
                         
                         // Try to extract cooldown from 409 Conflict errors
                         let error_str = e.to_string();
                         if error_str.contains("cooldown for") && error_str.contains("second(s)") {
                             // Extract cooldown seconds from error message
                             if let Some(cooldown_match) = extract_cooldown_from_error(&error_str) {
-                                println!("    ⏳ {} cooldown detected from error: {:.1} seconds", ship.symbol, cooldown_match);
+                                o_info!("    ⏳ {} cooldown detected from error: {:.1} seconds", ship.symbol, cooldown_match);
                                 _max_cooldown_seconds = _max_cooldown_seconds.max(cooldown_match);
                             }
                         }
@@ -269,11 +270,11 @@ impl<'a> MiningOperations<'a> {
             // Dynamic cooldown management based on actual API response
             if _max_cooldown_seconds > 0.0 {
                 let wait_seconds = (_max_cooldown_seconds as u64).min(120); // Cap at 2 minutes for safety
-                println!("⏳ Fleet cooldown management ({:.1} seconds from API response)...", _max_cooldown_seconds);
+                o_info!("⏳ Fleet cooldown management ({:.1} seconds from API response)...", _max_cooldown_seconds);
                 sleep(Duration::from_secs(wait_seconds)).await;
             } else {
                 // Fallback to short wait if no cooldown detected
-                println!("⏳ Brief pause (no cooldown detected, 5 second wait)...");
+                o_info!("⏳ Brief pause (no cooldown detected, 5 second wait)...");
                 sleep(Duration::from_secs(5)).await;
             }
             
@@ -303,23 +304,23 @@ impl<'a> MiningOperations<'a> {
                         .map(|delivery| delivery.units_required)
                         .sum::<i32>();
                     
-                    println!("\n📊 FLEET MINING PROGRESS:");
-                    println!("  🎯 Contract materials collected: {}/{}", total_contract_materials, needed_amount);
-                    println!("  📦 Ships with full cargo: {}/{}", full_ships, ready_miners.len());
+                    o_info!("\n📊 FLEET MINING PROGRESS:");
+                    o_info!("  🎯 Contract materials collected: {}/{}", total_contract_materials, needed_amount);
+                    o_info!("  📦 Ships with full cargo: {}/{}", full_ships, ready_miners.len());
                     
                     if total_contract_materials >= needed_amount {
-                        println!("🎉 CONTRACT REQUIREMENTS FULFILLED BY PARALLEL FLEET!");
+                        o_info!("🎉 CONTRACT REQUIREMENTS FULFILLED BY PARALLEL FLEET!");
                         break;
                     }
                 }
                 Err(e) => {
-                    println!("⚠️ Could not check fleet status: {}", e);
+                    o_info!("⚠️ Could not check fleet status: {}", e);
                 }
             }
         }
         
-        println!("\n🎉 PARALLEL autonomous survey-based mining operation complete!");
-        println!("💡 Multi-ship coordination achieved {}x efficiency with {} mining vessels!",
+        o_info!("\n🎉 PARALLEL autonomous survey-based mining operation complete!");
+        o_info!("💡 Multi-ship coordination achieved {}x efficiency with {} mining vessels!",
                 ready_miners.len(), ready_miners.len());
         
         Ok(())

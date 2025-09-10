@@ -1,46 +1,28 @@
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+// Keep these for compatibility but they're not needed with the broker
 use crate::models::*;
 use crate::API_BASE_URL;
+use crate::{o_debug};
+use crate::client::brokered_client::BrokeredClient;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::time::{Duration, Instant};
-use tokio::time::sleep;
-use tokio::sync::Mutex as TokioMutex;
 
 #[derive(Clone)]
 pub struct SpaceTradersClient {
-    client: reqwest::Client,
+    client: BrokeredClient,
     pub token: String,
     debug_mode: bool,
     api_logging: bool,
-    last_request_time: std::sync::Arc<TokioMutex<Option<Instant>>>,
-    // Global rate limiting state
-    global_backoff_until: std::sync::Arc<TokioMutex<Option<Instant>>>,
-    rate_limit_backoff_duration: std::sync::Arc<TokioMutex<Duration>>,
 }
 
 impl SpaceTradersClient {
     pub fn new(token: String) -> Self {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        );
-
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .unwrap();
+        let client = BrokeredClient::new(token.clone());
 
         SpaceTradersClient { 
-            client, 
+            client,
             token,
             debug_mode: false,
             api_logging: false,
-            last_request_time: std::sync::Arc::new(TokioMutex::new(None)),
-            global_backoff_until: std::sync::Arc::new(TokioMutex::new(None)),
-            rate_limit_backoff_duration: std::sync::Arc::new(TokioMutex::new(Duration::from_secs(1))),
         }
     }
     
@@ -52,90 +34,10 @@ impl SpaceTradersClient {
         self.api_logging = logging;
     }
     
-    /// Enforce rate limiting: SpaceTraders allows 2 requests per second with burst of 30
-    /// Now with GLOBAL backoff - if ANY request hits rate limit, ALL requests wait
-    async fn enforce_rate_limit(&self) {
-        // FIRST: Check global backoff state
-        {
-            let global_backoff = self.global_backoff_until.lock().await;
-            if let Some(backoff_until) = *global_backoff {
-                let now = Instant::now();
-                if now < backoff_until {
-                    let remaining = backoff_until - now;
-                    drop(global_backoff); // Release lock before sleeping
-                    println!("🌐 GLOBAL RATE LIMIT: Waiting {:.1}s (all API calls paused)", remaining.as_secs_f64());
-                    sleep(remaining).await;
-                }
-            }
-        }
-        
-        // SECOND: Normal per-request rate limiting
-        const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(500); // 2 req/sec = 500ms between requests
-        
-        let mut last_time = self.last_request_time.lock().await;
-        if let Some(last) = *last_time {
-            let elapsed = last.elapsed();
-            if elapsed < MIN_REQUEST_INTERVAL {
-                let sleep_duration = MIN_REQUEST_INTERVAL - elapsed;
-                drop(last_time); // Release lock before sleeping
-                sleep(sleep_duration).await;
-                last_time = self.last_request_time.lock().await;
-            }
-        }
-        *last_time = Some(Instant::now());
-    }
     
-    /// Handle 429 rate limit errors with GLOBAL backoff
-    /// When ANY request hits rate limit, ALL subsequent requests are paused
-    async fn handle_rate_limit_error(&self, retry_after: Option<f64>) {
-        let sleep_duration = if let Some(retry_after) = retry_after {
-            // Use the server-provided retry time
-            Duration::from_secs_f64(retry_after.max(0.1)) // Minimum 100ms
-        } else {
-            // Default backoff if no retry-after header
-            Duration::from_secs(1)
-        };
-        
-        // Set GLOBAL backoff - all API calls will wait until this time
-        let backoff_until = Instant::now() + sleep_duration;
-        {
-            let mut global_backoff = self.global_backoff_until.lock().await;
-            *global_backoff = Some(backoff_until);
-        }
-        
-        // Update the backoff duration for progressive backoff
-        {
-            let mut backoff_duration = self.rate_limit_backoff_duration.lock().await;
-            *backoff_duration = (*backoff_duration * 2).min(Duration::from_secs(10)); // Cap at 10 seconds
-        }
-        
-        println!("🌐 GLOBAL RATE LIMIT: All API calls paused for {:.1}s", sleep_duration.as_secs_f64());
-        sleep(sleep_duration).await;
-    }
     
-    /// Reset global backoff on successful requests
-    async fn reset_global_backoff(&self) {
-        let mut global_backoff = self.global_backoff_until.lock().await;
-        if global_backoff.is_some() {
-            *global_backoff = None;
-            // Reset backoff duration to initial value
-            let mut backoff_duration = self.rate_limit_backoff_duration.lock().await;
-            *backoff_duration = Duration::from_secs(1);
-        }
-    }
-    
-    /// Parse retry-after from 429 response
-    fn parse_retry_after(error_text: &str) -> Option<f64> {
-        // Try to extract retryAfter from the JSON error response
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(error_text) {
-            if let Some(retry_after) = json.get("error")?.get("data")?.get("retryAfter") {
-                return retry_after.as_f64();
-            }
-        }
-        None
-    }
-    
-    /// Wrapper for all HTTP requests with rate limiting and retry logic
+    /// Wrapper for all HTTP requests with retry logic
+    /// NOTE: Rate limiting is now handled by the centralized API broker
     async fn make_request_with_retry<T, F, Fut>(
         &self, 
         _method: &str, 
@@ -147,27 +49,19 @@ impl SpaceTradersClient {
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T, String>>,
     {
-        for attempt in 0..=max_retries {
-            // Enforce rate limiting before each request
-            self.enforce_rate_limit().await;
+        for _attempt in 0..=max_retries {
+            // Rate limiting is now handled by the centralized API broker - no need for enforce_rate_limit()
             
             match request_fn().await {
                 Ok(result) => {
-                    // Reset global backoff on successful request
-                    self.reset_global_backoff().await;
+                    // Success - broker handles all rate limiting now
                     return Ok(result);
                 }
                 Err(error_msg) => {
-                    // Check if it's a 429 rate limit error
-                    if error_msg.contains("429") && error_msg.contains("Too Many Requests") {
-                        if attempt < max_retries {
-                            let retry_after = Self::parse_retry_after(&error_msg);
-                            self.handle_rate_limit_error(retry_after).await;
-                            continue; // Retry
-                        }
-                    }
+                    // Rate limiting and retries are now handled by the centralized API broker
+                    // Just return the error without additional retry logic
                     
-                    // For non-rate-limit errors or final attempt, return the error
+                    // For final attempt or any error, return the error
                     return Err(error_msg);
                 }
             }
@@ -181,11 +75,11 @@ impl SpaceTradersClient {
             return true; // Always approve if not in debug mode
         }
         
-        println!("\n🐛 DEBUG API CALL:");
-        println!("   Method: {}", method);
-        println!("   URL: {}", url);
+        o_debug!("\n🐛 DEBUG API CALL:");
+        o_debug!("   Method: {}", method);
+        o_debug!("   URL: {}", url);
         if let Some(body) = body {
-            println!("   Body: {}", body);
+            o_debug!("   Body: {}", body);
         }
         print!("   Approve? (y/n): ");
         
@@ -650,7 +544,7 @@ impl SpaceTradersClient {
 
         let response_text = response.text().await?;
         if self.debug_mode {
-            println!("🔍 Refuel API response: {}", response_text);
+            o_debug!("🔍 Refuel API response: {}", response_text);
         }
         
         let refuel_response: RefuelResponse = serde_json::from_str(&response_text)?;
@@ -707,7 +601,7 @@ impl SpaceTradersClient {
 
         let response_text = response.text().await?;
         if self.debug_mode {
-            println!("🔍 Jettison API response: {}", response_text);
+            o_debug!("🔍 Jettison API response: {}", response_text);
         }
         
         let jettison_response: JettisonCargoResponse = serde_json::from_str(&response_text)?;
