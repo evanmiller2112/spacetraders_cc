@@ -76,8 +76,33 @@ impl Admiral {
                 contract
             }
             None => {
-                println!("⚠️  No contracts available - ending cycle");
-                return Ok(());
+                println!("📋 No active contracts available");
+                println!("   This could mean:");
+                println!("   • All contracts are fulfilled (great job!)");
+                println!("   • No new contracts offered yet");
+                println!("   • Need to wait for contract refresh");
+                println!("🔄 Continuing with fleet operations and exploration...");
+                
+                // Create a dummy contract for fleet operations to continue
+                // This allows mining, exploration, and fleet management to continue
+                use crate::models::*;
+                Contract {
+                    id: "NO_ACTIVE_CONTRACT".to_string(),
+                    faction_symbol: "SYSTEM".to_string(),
+                    contract_type: "NONE".to_string(),
+                    terms: ContractTerms {
+                        deadline: "2099-01-01T00:00:00.000Z".to_string(),
+                        payment: Payment {
+                            on_accepted: 0,
+                            on_fulfilled: 0,
+                        },
+                        deliver: vec![], // Empty delivery requirements
+                    },
+                    accepted: false,
+                    fulfilled: false,
+                    deadline_to_accept: "2099-01-01T00:00:00.000Z".to_string(),
+                    expiration: "2099-01-01T00:00:00.000Z".to_string(),
+                }
             }
         };
         
@@ -85,32 +110,38 @@ impl Admiral {
         println!("\n═══ STEP 3: Advanced Fleet Coordination ═══");
         
         // First, check if contract is already complete before starting fleet operations
-        println!("🔍 Pre-flight check: Is contract already complete?");
-        let contracts_for_check = self.client.get_contracts().await?;
-        let current_contract = contracts_for_check.iter().find(|c| c.id == active_contract.id);
-        
-        let contract_already_complete = if let Some(contract) = current_contract {
-            let total_units_fulfilled: i32 = contract.terms.deliver.iter()
-                .map(|d| d.units_fulfilled)
-                .sum();
-            let total_units_required: i32 = contract.terms.deliver.iter()
-                .map(|d| d.units_required)
-                .sum();
+        // Skip this check for dummy contracts
+        let contract_already_complete = if active_contract.id == "NO_ACTIVE_CONTRACT" {
+            println!("🔍 No active contract - skipping completion check");
+            false
+        } else {
+            println!("🔍 Pre-flight check: Is contract already complete?");
+            let contracts_for_check = self.client.get_contracts().await?;
+            let current_contract = contracts_for_check.iter().find(|c| c.id == active_contract.id);
             
-            let completion_percentage = (total_units_fulfilled * 100) / total_units_required.max(1);
-            println!("  📊 Contract status: {}/{} units fulfilled ({}%)", 
-                    total_units_fulfilled, total_units_required, completion_percentage);
-            
-            if total_units_fulfilled >= total_units_required {
-                println!("  🎉 Contract is already 100% complete! Skipping fleet coordination.");
-                true
+            if let Some(contract) = current_contract {
+                let total_units_fulfilled: i32 = contract.terms.deliver.iter()
+                    .map(|d| d.units_fulfilled)
+                    .sum();
+                let total_units_required: i32 = contract.terms.deliver.iter()
+                    .map(|d| d.units_required)
+                    .sum();
+                
+                let completion_percentage = (total_units_fulfilled * 100) / total_units_required.max(1);
+                println!("  📊 Contract status: {}/{} units fulfilled ({}%)", 
+                        total_units_fulfilled, total_units_required, completion_percentage);
+                
+                if total_units_fulfilled >= total_units_required {
+                    println!("  🎉 Contract is already 100% complete! Skipping fleet coordination.");
+                    true
+                } else {
+                    println!("  📈 Contract needs more work - proceeding with fleet coordination");
+                    false
+                }
             } else {
-                println!("  📈 Contract needs more work - proceeding with fleet coordination");
+                println!("  ⚠️ Could not verify contract status - proceeding with fleet coordination");
                 false
             }
-        } else {
-            println!("  ⚠️ Could not verify contract status - proceeding with fleet coordination");
-            false
         };
         
         // Use config manager for hot-reloading configuration

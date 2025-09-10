@@ -90,8 +90,53 @@ impl<'a> ContractOperations<'a> {
                 }
             }
         } else {
-            println!("  ℹ️ All contracts already accepted");
-            Ok(contracts.into_iter().find(|c| c.accepted))
+            // No new contracts to accept - look for active (accepted but not fulfilled) contracts
+            println!("  ℹ️ No new contracts to accept - checking for active contracts");
+            
+            // First, let's categorize all contracts
+            let fulfilled_contracts: Vec<_> = contracts.iter()
+                .filter(|c| c.fulfilled)
+                .cloned()
+                .collect();
+            
+            // Filter contracts: accepted=true AND fulfilled=false
+            let active_contracts: Vec<_> = contracts.into_iter()
+                .filter(|c| c.accepted && !c.fulfilled)
+                .collect();
+            
+            if active_contracts.is_empty() {
+                // Check if we have any fulfilled contracts to report
+                
+                if !fulfilled_contracts.is_empty() {
+                    println!("  🎉 Found {} fulfilled contract(s):", fulfilled_contracts.len());
+                    for contract in &fulfilled_contracts {
+                        println!("    ✅ {} - COMPLETED", contract.id);
+                    }
+                    println!("  🔍 No active contracts found - need to wait for new contracts");
+                } else {
+                    println!("  📋 No active contracts found");
+                }
+                
+                Ok(None)
+            } else {
+                println!("  📋 Found {} active contract(s) to work on:", active_contracts.len());
+                for contract in &active_contracts {
+                    let progress: i32 = contract.terms.deliver.iter()
+                        .map(|d| d.units_fulfilled)
+                        .sum();
+                    let required: i32 = contract.terms.deliver.iter()
+                        .map(|d| d.units_required)
+                        .sum();
+                    let percentage = if required > 0 { (progress * 100) / required } else { 0 };
+                    
+                    println!("    🔄 {} - {}% complete ({}/{})", 
+                            contract.id, percentage, progress, required);
+                }
+                
+                // For now, return the first active contract
+                // TODO: In the future, we could work on multiple contracts simultaneously
+                Ok(Some(active_contracts[0].clone()))
+            }
         }
     }
 
