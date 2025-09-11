@@ -257,8 +257,8 @@ impl ContextEngine {
             }
         }
         
-        if goal_description.contains("refine") {
-            // Check if we have hauler ships for transport
+        if goal_description.contains("refine") && !goal_description.contains("designate") {
+            // Check if we have hauler ships for transport (only for actual refining operations, not designation)
             if context.fleet_status.hauler_ships.is_empty() {
                 return Err("No hauler ships available for refining operations".to_string());
             }

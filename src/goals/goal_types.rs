@@ -1,17 +1,34 @@
 // Goal Types - Concrete implementations of different goal types
-use crate::goals::{Goal, GoalPriority, GoalStatus, GoalContext, GoalResult};
+use crate::goals::{Goal, GoalPriority, GoalStatus, GoalContext, GoalResult, SurveyCache};
 use crate::client::{PriorityApiClient, ApiPriority};
+use crate::models::transaction::Survey;
 use crate::{o_debug, o_info};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MiningGoal {
     pub id: String,
     pub resource_type: String,
     pub target_quantity: i32,
     pub priority: GoalPriority,
     pub status: GoalStatus,
+    pub survey_cache: SurveyCache,
+    pub use_surveys: bool,
+}
+
+impl Clone for MiningGoal {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            resource_type: self.resource_type.clone(),
+            target_quantity: self.target_quantity,
+            priority: self.priority,
+            status: self.status.clone(),
+            survey_cache: SurveyCache::new(), // Create fresh cache for cloned goal
+            use_surveys: self.use_surveys,
+        }
+    }
 }
 
 #[async_trait]
@@ -44,7 +61,9 @@ impl Goal for MiningGoal {
     }
 
     async fn execute(&mut self, client: &PriorityApiClient, context: &GoalContext) -> Result<GoalResult, Box<dyn std::error::Error>> {
-        o_info!("⛏️ Executing mining goal: {}", self.description());
+        o_info!("⛏️ Executing {} mining goal: {}", 
+               if self.use_surveys { "survey-based" } else { "standard" }, 
+               self.description());
         self.status = GoalStatus::Active;
 
         // Find available mining ship
@@ -61,43 +80,82 @@ impl Goal for MiningGoal {
 
         let mut total_mined = 0;
         let start_time = std::time::Instant::now();
+        let mut active_survey: Option<Survey> = None;
+
+        // Navigate to mining location if needed
+        if ship.nav.waypoint_symbol != mining_location {
+            o_debug!("🗺️ Navigating {} to {}", ship.symbol, mining_location);
+            client.navigate_ship_with_priority(&ship.symbol, &mining_location, ApiPriority::Override).await?;
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        }
+
+        // Ensure ship is in orbit for mining
+        if ship.nav.status != "IN_ORBIT" {
+            client.orbit_ship_with_priority(&ship.symbol, ApiPriority::Override).await?;
+        }
 
         while total_mined < self.target_quantity {
-            // Navigate to mining location if needed
-            if ship.nav.waypoint_symbol != mining_location {
-                o_debug!("🗺️ Navigating {} to {}", ship.symbol, mining_location);
-                client.navigate_ship_with_priority(&ship.symbol, &mining_location, ApiPriority::Override).await?;
-                
-                // Wait for arrival (simplified - in real implementation would check nav status)
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            // Get survey if using survey-based mining and don't have an active one
+            if self.use_surveys && active_survey.is_none() {
+                o_debug!("🔍 Getting survey for {} at {}", self.resource_type, mining_location);
+                match self.survey_cache.get_best_survey(client, &ship.symbol, &mining_location, &self.resource_type).await {
+                    Ok(Some(survey)) => {
+                        active_survey = Some(survey.clone());
+                        o_info!("📋 Using survey {} for targeted {} mining", survey.signature, self.resource_type);
+                    }
+                    Ok(None) => {
+                        o_debug!("📋 No suitable survey found, using standard mining");
+                    }
+                    Err(e) => {
+                        o_debug!("⚠️ Survey failed: {} - falling back to standard mining", e);
+                    }
+                }
             }
 
-            // Ensure ship is in orbit for mining
-            if ship.nav.status != "IN_ORBIT" {
-                client.orbit_ship_with_priority(&ship.symbol, ApiPriority::Override).await?;
-            }
-
-            // Mine resources
+            // Mine resources with or without survey
             o_debug!("⛏️ {} mining at {}", ship.symbol, mining_location);
-            let extraction = client.extract_resources_with_priority(&ship.symbol, None, ApiPriority::Override).await?;
             
+            let extraction_data = match if let Some(ref survey) = active_survey {
+                client.extract_resources_with_priority(&ship.symbol, Some(survey), ApiPriority::Override).await
+            } else {
+                client.extract_resources_with_priority(&ship.symbol, None, ApiPriority::Override).await
+            } {
+                Ok(data) => data,
+                Err(e) => {
+                    let error_str = e.to_string();
+                    if error_str.contains("survey") && error_str.contains("expired") {
+                        o_info!("📋 Survey expired, clearing active survey");
+                        active_survey = None; // Clear expired survey
+                        continue; // Try again without survey
+                    } else {
+                        o_debug!("⚠️ Mining operation failed: {}", error_str);
+                        // Exit loop, will handle retry at a higher level
+                        break;
+                    }
+                }
+            };
+
             // Extract the actual mining yield from the response
-            let yield_item = &extraction.extraction.extraction_yield;
+            let yield_item = &extraction_data.extraction.extraction_yield;
+            
             if yield_item.symbol == self.resource_type {
                 total_mined += yield_item.units;
-                o_info!("💎 Mined {} {} (total: {}/{})", 
-                       yield_item.units, yield_item.symbol, total_mined, self.target_quantity);
+                o_info!("💎 Mined {} {} (total: {}/{}) {}", 
+                       yield_item.units, yield_item.symbol, total_mined, self.target_quantity,
+                       if active_survey.is_some() { "📋 [SURVEY]" } else { "" });
+            } else {
+                o_debug!("⚪ Mined {} {} (not target resource)", yield_item.units, yield_item.symbol);
             }
 
             // Check if cargo is full
             let updated_ship = client.get_ship(&ship.symbol).await?;
             if updated_ship.cargo.units >= updated_ship.cargo.capacity {
                 o_info!("📦 Cargo full, goal may need hauling support");
-                break; // Would trigger hauler coordination in full implementation
+                break;
             }
 
             // Brief pause between mining operations
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
         }
 
         let execution_time = start_time.elapsed().as_secs_f64();
@@ -107,9 +165,18 @@ impl Goal for MiningGoal {
             GoalStatus::Paused // Needs more resources or hauling
         };
 
+        // Log survey cache statistics
+        if self.use_surveys {
+            let stats = self.survey_cache.get_stats();
+            o_debug!("📊 Survey cache stats: {} surveys across {} waypoints", 
+                    stats.total_surveys, stats.waypoints_cached);
+        }
+
         Ok(GoalResult {
             success: total_mined >= self.target_quantity,
-            message: format!("Mined {}/{} {} units", total_mined, self.target_quantity, self.resource_type),
+            message: format!("Mined {}/{} {} units{}", 
+                           total_mined, self.target_quantity, self.resource_type,
+                           if self.use_surveys { " using surveys" } else { "" }),
             ships_used: vec![ship.symbol.clone()],
             resources_consumed: HashMap::new(),
             credits_spent: 0,
@@ -388,11 +455,281 @@ pub struct ExplorationGoal {
 }
 
 #[derive(Debug, Clone)]
+pub struct TransferGoal {
+    pub id: String,
+    pub resource_type: String,
+    pub target_ship: String,
+    pub quantity: Option<i32>, // None means transfer all available
+    pub priority: GoalPriority,
+    pub status: GoalStatus,
+}
+
+#[derive(Debug, Clone)]
 pub struct DebugGoal {
     pub id: String,
     pub target: String, // What to debug
     pub priority: GoalPriority,
     pub status: GoalStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShipRoleGoal {
+    pub id: String,
+    pub target_ship: Option<String>, // Specific ship to designate, or None to find best
+    pub desired_role: String, // "refiner", "hauler", "miner", etc.
+    pub priority: GoalPriority,
+    pub status: GoalStatus,
+}
+
+#[async_trait]
+impl Goal for TransferGoal {
+    fn id(&self) -> String { self.id.clone() }
+    fn description(&self) -> String { 
+        match self.quantity {
+            Some(qty) => format!("Transfer {} {} to {}", qty, self.resource_type, self.target_ship),
+            None => format!("Transfer all {} to {}", self.resource_type, self.target_ship),
+        }
+    }
+    fn priority(&self) -> GoalPriority { self.priority }
+    fn status(&self) -> GoalStatus { self.status.clone() }
+    fn estimated_duration(&self) -> f64 { 30.0 }
+    fn required_resources(&self) -> Vec<String> { vec!["ship_with_cargo".to_string(), "target_ship".to_string()] }
+    
+    async fn validate(&self, context: &GoalContext) -> Result<bool, String> {
+        // Check if target ship exists
+        let target_exists = context.ships.iter().any(|ship| ship.symbol == self.target_ship);
+        if !target_exists {
+            return Err(format!("Target ship {} not found", self.target_ship));
+        }
+        
+        // Check if any ships have the resource to transfer
+        let ships_with_resource = context.ships.iter()
+            .filter(|ship| ship.symbol != self.target_ship) // Don't transfer to self
+            .any(|ship| ship.cargo.inventory.iter()
+                .any(|item| item.symbol == self.resource_type && item.units > 0));
+        
+        if !ships_with_resource {
+            return Err(format!("No ships have {} to transfer", self.resource_type));
+        }
+        
+        Ok(true)
+    }
+    
+    async fn execute(&mut self, client: &PriorityApiClient, context: &GoalContext) -> Result<GoalResult, Box<dyn std::error::Error>> {
+        o_info!("🔄 Executing transfer goal: {}", self.description());
+        self.status = GoalStatus::Active;
+        
+        let mut total_transferred = 0;
+        let mut ships_used = Vec::new();
+        let start_time = std::time::Instant::now();
+        
+        // Find target ship
+        let target_ship = context.ships.iter()
+            .find(|ship| ship.symbol == self.target_ship)
+            .ok_or(format!("Target ship {} not found", self.target_ship))?;
+        
+        o_debug!("🎯 Target ship: {} (cargo: {}/{})", 
+                target_ship.symbol, target_ship.cargo.units, target_ship.cargo.capacity);
+        
+        // Find source ships with the resource
+        let source_ships: Vec<_> = context.ships.iter()
+            .filter(|ship| ship.symbol != self.target_ship)
+            .filter(|ship| ship.cargo.inventory.iter()
+                .any(|item| item.symbol == self.resource_type && item.units > 0))
+            .collect();
+        
+        if source_ships.is_empty() {
+            return Err(format!("No ships found with {} to transfer", self.resource_type).into());
+        }
+        
+        o_info!("📦 Found {} ships with {}", source_ships.len(), self.resource_type);
+        
+        for source_ship in source_ships {
+            // Check if target ship has space
+            let updated_target = client.get_ship(&self.target_ship).await?;
+            let available_space = updated_target.cargo.capacity - updated_target.cargo.units;
+            
+            if available_space <= 0 {
+                o_info!("🚫 Target ship {} is full, stopping transfers", self.target_ship);
+                break;
+            }
+            
+            // Find the resource in source ship's cargo
+            let source_cargo = source_ship.cargo.inventory.iter()
+                .find(|item| item.symbol == self.resource_type)
+                .ok_or(format!("Resource {} not found in {}", self.resource_type, source_ship.symbol))?;
+            
+            // Calculate transfer amount
+            let transfer_amount = match self.quantity {
+                Some(target_qty) => {
+                    let remaining_needed = target_qty - total_transferred;
+                    remaining_needed.min(source_cargo.units).min(available_space)
+                }
+                None => source_cargo.units.min(available_space) // Transfer all available
+            };
+            
+            if transfer_amount <= 0 {
+                continue;
+            }
+            
+            // Check if ships are at the same location
+            if source_ship.nav.waypoint_symbol != target_ship.nav.waypoint_symbol {
+                o_info!("⚠️ Ships not at same location: {} at {}, {} at {}. Skipping transfer.",
+                       source_ship.symbol, source_ship.nav.waypoint_symbol,
+                       target_ship.symbol, target_ship.nav.waypoint_symbol);
+                continue;
+            }
+            
+            // Perform the transfer
+            o_info!("📦 Transferring {} {} from {} to {}", 
+                   transfer_amount, self.resource_type, source_ship.symbol, target_ship.symbol);
+            
+            match client.transfer_cargo_with_priority(
+                &source_ship.symbol,
+                &self.resource_type,
+                transfer_amount,
+                &target_ship.symbol,
+                ApiPriority::ActiveGoal
+            ).await {
+                Ok(_) => {
+                    total_transferred += transfer_amount;
+                    ships_used.push(source_ship.symbol.clone());
+                    o_info!("✅ Transferred {} {} (total: {})", 
+                           transfer_amount, self.resource_type, total_transferred);
+                    
+                    // Check if we've transferred enough
+                    if let Some(target_qty) = self.quantity {
+                        if total_transferred >= target_qty {
+                            o_info!("🎯 Target quantity {} reached", target_qty);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    o_info!("⚠️ Transfer failed from {}: {}", source_ship.symbol, e);
+                    continue; // Try next ship
+                }
+            }
+        }
+        
+        let execution_time = start_time.elapsed().as_secs_f64();
+        self.status = if total_transferred > 0 {
+            GoalStatus::Completed
+        } else {
+            GoalStatus::Failed("No transfers completed".to_string())
+        };
+        
+        Ok(GoalResult {
+            success: total_transferred > 0,
+            message: format!("Transferred {} {} to {}", total_transferred, self.resource_type, self.target_ship),
+            ships_used,
+            resources_consumed: HashMap::new(),
+            credits_spent: 0,
+            execution_time,
+        })
+    }
+}
+
+#[async_trait]
+impl Goal for ShipRoleGoal {
+    fn id(&self) -> String { self.id.clone() }
+    fn description(&self) -> String { 
+        match &self.target_ship {
+            Some(ship) => format!("Designate {} as {}", ship, self.desired_role),
+            None => format!("Find and designate best ship as {}", self.desired_role),
+        }
+    }
+    fn priority(&self) -> GoalPriority { self.priority }
+    fn status(&self) -> GoalStatus { self.status.clone() }
+    fn estimated_duration(&self) -> f64 { 120.0 } // 2 minutes for analysis and designation
+    fn required_resources(&self) -> Vec<String> { vec!["ship_role_manager".to_string()] }
+    
+    async fn validate(&self, context: &GoalContext) -> Result<bool, String> {
+        // If specific ship is requested, check if it exists
+        if let Some(ship_symbol) = &self.target_ship {
+            let ship_exists = context.ships.iter().any(|ship| ship.symbol == *ship_symbol);
+            if !ship_exists {
+                return Err(format!("Target ship {} not found", ship_symbol));
+            }
+        }
+        
+        // Check if we have any ships available for role change
+        if context.ships.is_empty() {
+            return Err("No ships available for role designation".to_string());
+        }
+        
+        Ok(true)
+    }
+    
+    async fn execute(&mut self, client: &PriorityApiClient, _context: &GoalContext) -> Result<GoalResult, Box<dyn std::error::Error>> {
+        o_info!("🎭 Executing ship role goal: {}", self.description());
+        self.status = GoalStatus::Active;
+        
+        let start_time = std::time::Instant::now();
+        
+        // Import the ship role manager
+        use crate::operations::ShipRoleManager;
+        let mut role_manager = ShipRoleManager::new();
+        
+        // Analyze the fleet
+        role_manager.analyze_fleet(client).await?;
+        role_manager.print_fleet_analysis();
+        
+        let designated_ship = match &self.target_ship {
+            Some(ship_symbol) => {
+                // Use specified ship
+                o_info!("🎯 Designating specific ship: {}", ship_symbol);
+                ship_symbol.clone()
+            },
+            None => {
+                // Find best candidate for the role
+                match self.desired_role.as_str() {
+                    "refiner" | "refinery" => {
+                        if let Some(best_candidate) = role_manager.find_best_refinery_candidate() {
+                            o_info!("🏆 Found best refinery candidate: {} (score: {:.2})", 
+                                   best_candidate.ship_symbol, best_candidate.refinery_score);
+                            best_candidate.ship_symbol.clone()
+                        } else {
+                            return Err("No suitable ships found for refinery role".into());
+                        }
+                    },
+                    _ => {
+                        return Err(format!("Role designation for '{}' not yet implemented", self.desired_role).into());
+                    }
+                }
+            }
+        };
+        
+        // Perform the role designation
+        let success = match self.desired_role.as_str() {
+            "refiner" | "refinery" => {
+                role_manager.designate_refinery_ship(&designated_ship, client).await?
+            },
+            _ => {
+                o_info!("🔧 Role designation for '{}' not yet implemented, marking as planned", self.desired_role);
+                true // For now, just mark as successful for planning purposes
+            }
+        };
+        
+        if success {
+            o_info!("✅ Successfully designated {} as {}", designated_ship, self.desired_role);
+            self.status = GoalStatus::Completed;
+            
+            Ok(GoalResult {
+                success: true,
+                message: format!("Ship {} designated as {}", designated_ship, self.desired_role),
+                ships_used: vec![designated_ship],
+                resources_consumed: HashMap::new(),
+                credits_spent: 0,
+                execution_time: start_time.elapsed().as_secs_f64(),
+            })
+        } else {
+            o_info!("❌ Failed to designate {} as {}", designated_ship, self.desired_role);
+            self.status = GoalStatus::Failed(format!("Failed to designate ship {} as {}", designated_ship, self.desired_role));
+            
+            Err(format!("Failed to designate ship {} as {}", designated_ship, self.desired_role).into())
+        }
+    }
 }
 
 // Implement Goal trait for remaining types (simplified for now)

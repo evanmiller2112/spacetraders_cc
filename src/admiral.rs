@@ -134,8 +134,95 @@ impl Admiral {
             }
         };
         
-        // Step 2.5: Contract Fulfillment Strategy (BEFORE fleet coordination)
-        o_debug!( "\n═══ STEP 2.5: Contract Fulfillment Strategy ═══");
+        // Step 2.5: Contract Analysis & Ship Role Auto-Assignment
+        o_debug!("\n═══ STEP 2.5: Contract Analysis & Ship Role Requirements ═══");
+        
+        if active_contract.id != "NO_ACTIVE_CONTRACT" && active_contract.accepted && !active_contract.fulfilled {
+            o_info!("🔍 Analyzing contract requirements and fleet capabilities...");
+            
+            // Use the contract analyzer to detect requirements and suggest ship roles
+            use crate::client::priority_client::PriorityApiClient;
+            let priority_client = PriorityApiClient::new(self.client.clone());
+            let contract_analyzer = ContractAnalyzer::new();
+            
+            match contract_analyzer.auto_analyze_and_suggest(&priority_client, &active_contract).await {
+                Ok(suggested_goals) => {
+                    if !suggested_goals.is_empty() {
+                        o_info!("🎯 Contract analysis detected {} ship role requirements:", suggested_goals.len());
+                        
+                        // Execute the suggested ship role goals immediately
+                        // This ensures we have the right ships before starting main operations
+                        for mut goal in suggested_goals {
+                            o_info!("🚀 Auto-executing: {}", goal.description());
+                            
+                            // Create a basic goal context for validation
+                            let ships = priority_client.get_ships().await.unwrap_or_default();
+                            let agent = priority_client.get_agent().await.unwrap_or_else(|_| {
+                                // Create a minimal agent for goal validation purposes
+                                crate::models::Agent {
+                                    account_id: "temp".to_string(),
+                                    symbol: "temp".to_string(),
+                                    headquarters: "temp".to_string(),
+                                    credits: 0,
+                                    starting_faction: "temp".to_string(),
+                                    ship_count: 0,
+                                }
+                            });
+                            let goal_context = crate::goals::GoalContext {
+                                ships,
+                                agent,
+                                contracts: vec![active_contract.clone()],
+                                known_waypoints: std::collections::HashMap::new(),
+                                known_markets: std::collections::HashMap::new(),
+                                available_credits: 0,
+                                fleet_status: crate::goals::FleetStatus {
+                                    available_ships: vec![],
+                                    busy_ships: std::collections::HashMap::new(),
+                                    mining_ships: vec![],
+                                    hauler_ships: vec![],
+                                    probe_ships: vec![],
+                                },
+                            };
+                            
+                            // Validate and execute the goal
+                            match goal.validate(&goal_context).await {
+                                Ok(true) => {
+                                    match goal.execute(&priority_client, &goal_context).await {
+                                        Ok(result) => {
+                                            if result.success {
+                                                o_info!("  ✅ {}: {}", goal.description(), result.message);
+                                            } else {
+                                                o_info!("  ❌ {}: Failed", goal.description());
+                                            }
+                                        }
+                                        Err(e) => {
+                                            o_info!("  ⚠️ {}: Error - {}", goal.description(), e);
+                                        }
+                                    }
+                                }
+                                Ok(false) => {
+                                    o_info!("  ⚠️ {}: Validation failed", goal.description());
+                                }
+                                Err(e) => {
+                                    o_info!("  ❌ {}: Validation error - {}", goal.description(), e);
+                                }
+                            }
+                        }
+                    } else {
+                        o_info!("✅ Fleet composition is adequate for current contract");
+                    }
+                }
+                Err(e) => {
+                    o_info!("⚠️ Contract analysis failed: {}", e);
+                    o_info!("   Continuing with normal operations...");
+                }
+            }
+        } else {
+            o_debug!("⏭️ Skipping ship role analysis (no active contract)");
+        }
+        
+        // Step 2.6: Contract Fulfillment Strategy (AFTER ship role assignment)
+        o_debug!( "\n═══ STEP 2.6: Contract Fulfillment Strategy ═══");
         
         // Get contract materials early to determine strategy
         let needed_materials = {

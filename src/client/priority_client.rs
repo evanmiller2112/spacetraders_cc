@@ -2,7 +2,10 @@
 use crate::client::SpaceTradersClient;
 use crate::models::*;
 use crate::models::ship::{NavigationData, ShipNav};
-use crate::models::transaction::{ExtractionData, RefuelData, SellCargoData};
+use crate::models::transaction::{ExtractionData, RefuelData, SellCargoData, Survey, SurveyData, TransferCargoData, RefineData};
+use crate::models::market::PurchaseCargoData;
+use crate::models::responses::{ModuleInstallData, ModuleRemovalData};
+use crate::models::ShipModule;
 use crate::{o_debug, o_info};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -77,9 +80,22 @@ impl PriorityApiClient {
         self.client.orbit_ship(ship_symbol).await
     }
 
-    pub async fn extract_resources_with_priority(&self, ship_symbol: &str, _survey: Option<&Survey>, priority: ApiPriority) -> Result<ExtractionData, Box<dyn std::error::Error>> {
-        self.log_request(priority, &format!("extract_resources({}) [PRIORITY]", ship_symbol));
-        self.client.extract_resources(ship_symbol).await
+    pub async fn extract_resources_with_priority(&self, ship_symbol: &str, survey: Option<&Survey>, priority: ApiPriority) -> Result<ExtractionData, Box<dyn std::error::Error>> {
+        match survey {
+            Some(survey_data) => {
+                self.log_request(priority, &format!("extract_resources_with_survey({}, {}) [PRIORITY]", ship_symbol, survey_data.signature));
+                self.client.extract_resources_with_survey(ship_symbol, survey_data).await
+            }
+            None => {
+                self.log_request(priority, &format!("extract_resources({}) [PRIORITY]", ship_symbol));
+                self.client.extract_resources(ship_symbol).await
+            }
+        }
+    }
+
+    pub async fn create_survey_with_priority(&self, ship_symbol: &str, priority: ApiPriority) -> Result<SurveyData, Box<dyn std::error::Error>> {
+        self.log_request(priority, &format!("create_survey({}) [PRIORITY]", ship_symbol));
+        self.client.create_survey(ship_symbol).await
     }
 
     pub async fn refuel_ship_with_priority(&self, ship_symbol: &str, _units: Option<i32>, priority: ApiPriority) -> Result<RefuelData, Box<dyn std::error::Error>> {
@@ -90,6 +106,47 @@ impl PriorityApiClient {
     pub async fn sell_cargo_with_priority(&self, ship_symbol: &str, trade_symbol: &str, units: i32, priority: ApiPriority) -> Result<SellCargoData, Box<dyn std::error::Error>> {
         self.log_request(priority, &format!("sell_cargo({}, {}, {}) [PRIORITY]", ship_symbol, trade_symbol, units));
         self.client.sell_cargo(ship_symbol, trade_symbol, units).await
+    }
+
+    pub async fn transfer_cargo_with_priority(&self, ship_symbol: &str, trade_symbol: &str, units: i32, ship_symbol_to: &str, priority: ApiPriority) -> Result<TransferCargoData, Box<dyn std::error::Error>> {
+        self.log_request(priority, &format!("transfer_cargo({} -> {}, {}, {}) [PRIORITY]", ship_symbol, ship_symbol_to, trade_symbol, units));
+        self.client.transfer_cargo(ship_symbol, trade_symbol, units, ship_symbol_to).await
+    }
+
+    pub async fn install_ship_module_with_priority(&self, ship_symbol: &str, module_symbol: &str, priority: ApiPriority) -> Result<ModuleInstallData, Box<dyn std::error::Error>> {
+        self.log_request(priority, &format!("install_ship_module({}, {}) [PRIORITY]", ship_symbol, module_symbol));
+        self.client.install_ship_module(ship_symbol, module_symbol).await
+    }
+
+    pub async fn remove_ship_module_with_priority(&self, ship_symbol: &str, module_symbol: &str, priority: ApiPriority) -> Result<ModuleRemovalData, Box<dyn std::error::Error>> {
+        self.log_request(priority, &format!("remove_ship_module({}, {}) [PRIORITY]", ship_symbol, module_symbol));
+        self.client.remove_ship_module(ship_symbol, module_symbol).await
+    }
+
+    pub async fn get_ship_modules_with_priority(&self, ship_symbol: &str, priority: ApiPriority) -> Result<Vec<ShipModule>, Box<dyn std::error::Error>> {
+        self.log_request(priority, &format!("get_ship_modules({}) [PRIORITY]", ship_symbol));
+        self.client.get_ship_modules(ship_symbol).await
+    }
+
+    pub async fn purchase_cargo_with_priority(&self, ship_symbol: &str, trade_symbol: &str, units: i32, priority: ApiPriority) -> Result<PurchaseCargoData, Box<dyn std::error::Error>> {
+        self.log_request(priority, &format!("purchase_cargo({}, {}, {}) [PRIORITY]", ship_symbol, trade_symbol, units));
+        self.client.purchase_cargo(ship_symbol, trade_symbol, units).await
+    }
+
+    pub async fn refine_cargo_with_priority(&self, ship_symbol: &str, produce: &str, priority: ApiPriority) -> Result<RefineData, Box<dyn std::error::Error>> {
+        self.log_request(priority, &format!("refine_cargo({}, {}) [PRIORITY]", ship_symbol, produce));
+        self.client.refine_cargo(ship_symbol, produce).await
+    }
+
+    // Ship repair operations
+    pub async fn get_repair_cost(&self, ship_symbol: &str) -> Result<RepairCost, Box<dyn std::error::Error>> {
+        self.log_request(ApiPriority::Background, &format!("get_repair_cost({})", ship_symbol));
+        self.client.get_repair_cost(ship_symbol).await
+    }
+
+    pub async fn repair_ship(&self, ship_symbol: &str) -> Result<RepairData, Box<dyn std::error::Error>> {
+        self.log_request(ApiPriority::Urgent, &format!("repair_ship({}) [URGENT REPAIR]", ship_symbol));
+        self.client.repair_ship(ship_symbol).await
     }
 
     fn log_request(&self, priority: ApiPriority, description: &str) {

@@ -194,3 +194,90 @@ pub struct JumpResponse {
 pub struct JettisonCargoResponse {
     pub data: crate::models::transaction::JettisonCargoData,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct TransferCargoResponse {
+    pub data: crate::models::transaction::TransferCargoData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefineResponse {
+    pub data: crate::models::transaction::RefineData,
+}
+
+// Module management responses
+#[derive(Debug, Deserialize)]
+pub struct ModuleInstallResponse {
+    pub data: ModuleInstallData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModuleRemovalResponse {
+    pub data: ModuleRemovalData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShipModulesResponse {
+    pub data: Vec<crate::models::ShipModule>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModuleInstallData {
+    pub agent: crate::models::Agent,
+    pub modules: Vec<crate::models::ShipModule>,
+    pub cargo: crate::models::ShipCargo,
+    pub transaction: ModuleTransaction,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModuleRemovalData {
+    pub agent: crate::models::Agent,
+    pub modules: Vec<crate::models::ShipModule>,
+    pub cargo: crate::models::ShipCargo,
+    pub transaction: ModuleTransaction,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModuleTransaction {
+    #[serde(rename = "waypointSymbol")]
+    pub waypoint_symbol: String,
+    #[serde(rename = "shipSymbol")]
+    pub ship_symbol: String,
+    #[serde(rename = "totalPrice")]
+    pub total_price: i32,
+    pub timestamp: String,
+}
+
+// Ship repair responses
+#[derive(Debug, Deserialize)]
+pub struct RepairCostResponse {
+    pub data: RepairCost,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepairResponse {
+    pub data: RepairData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepairCost {
+    pub transaction: RepairTransaction,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepairData {
+    pub agent: crate::models::Agent,
+    pub ship: crate::models::Ship,
+    pub transaction: RepairTransaction,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepairTransaction {
+    #[serde(rename = "waypointSymbol")]
+    pub waypoint_symbol: String,
+    #[serde(rename = "shipSymbol")]
+    pub ship_symbol: String,
+    #[serde(rename = "totalPrice")]
+    pub total_price: i32,
+    pub timestamp: String,
+}

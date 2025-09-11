@@ -5,6 +5,7 @@ pub mod goal_interpreter;
 pub mod goal_decomposer;
 pub mod resource_allocator;
 pub mod context_engine;
+pub mod survey_cache;
 
 pub use goal_types::*;
 pub use goal_manager::GoalManager;
@@ -12,6 +13,7 @@ pub use goal_interpreter::GoalInterpreter;
 pub use goal_decomposer::GoalDecomposer;
 pub use resource_allocator::ResourceAllocator;
 pub use context_engine::ContextEngine;
+pub use survey_cache::SurveyCache;
 
 use crate::client::{PriorityApiClient, ApiPriority};
 use crate::models::*;

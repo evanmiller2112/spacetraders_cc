@@ -28,6 +28,8 @@ impl GoalInterpreter {
         action_keywords.insert("buy".to_string(), vec!["purchase".to_string(), "acquire".to_string()]);
         action_keywords.insert("explore".to_string(), vec!["scout".to_string(), "discover".to_string(), "survey".to_string()]);
         action_keywords.insert("debug".to_string(), vec!["analyze".to_string(), "inspect".to_string(), "examine".to_string()]);
+        action_keywords.insert("transfer".to_string(), vec!["move".to_string(), "consolidate".to_string(), "transport".to_string()]);
+        action_keywords.insert("designate".to_string(), vec!["assign".to_string(), "role".to_string(), "convert".to_string()]);
         
         let mut ship_type_keywords = HashMap::new();
         ship_type_keywords.insert("mining".to_string(), vec!["excavator".to_string(), "miner".to_string()]);
@@ -61,6 +63,8 @@ impl GoalInterpreter {
             "buy" => self.parse_buying_goal(&tokens).await,
             "explore" => self.parse_exploration_goal(&tokens).await,
             "debug" => self.parse_debug_goal(&tokens).await,
+            "transfer" => self.parse_transfer_goal(&tokens).await,
+            "designate" => self.parse_ship_role_goal(&tokens).await,
             _ => Err(format!("Unknown action: {}", action)),
         }
     }
@@ -105,6 +109,8 @@ impl GoalInterpreter {
             target_quantity: quantity,
             priority: GoalPriority::Override, // Development goals get highest priority
             status: crate::goals::GoalStatus::Pending,
+            survey_cache: crate::goals::SurveyCache::new(),
+            use_surveys: true, // Enable survey-based mining by default
         }))
     }
 
@@ -257,5 +263,63 @@ impl GoalInterpreter {
         }
         
         Err("Could not determine ship type from command".to_string())
+    }
+
+    async fn parse_transfer_goal(&self, tokens: &[&str]) -> Result<Box<dyn Goal>, String> {
+        let resource = self.extract_resource(tokens)?;
+        let quantity = self.extract_quantity(tokens); // Keep as Option<i32>
+        
+        // Look for ship identifier in tokens (format: SHIP_ID-...)
+        let target_ship = tokens.iter()
+            .find(|&t| t.contains("-") && t.len() > 3)
+            .map(|s| s.to_uppercase())
+            .ok_or_else(|| "No target ship specified in transfer command".to_string())?;
+        
+        let quantity_str = quantity.map(|q| q.to_string()).unwrap_or_else(|| "all".to_string());
+        o_debug!("🚛 Parsing transfer goal: {} units of {} to {}", quantity_str, resource, target_ship);
+        
+        Ok(Box::new(TransferGoal {
+            id: format!("transfer_{}_{}_to_{}", resource.to_lowercase(), quantity_str, target_ship.to_lowercase()),
+            resource_type: resource,
+            target_ship,
+            quantity,
+            priority: GoalPriority::Override,
+            status: crate::goals::GoalStatus::Pending,
+        }))
+    }
+
+    async fn parse_ship_role_goal(&self, tokens: &[&str]) -> Result<Box<dyn Goal>, String> {
+        // Look for role keywords
+        let desired_role = if tokens.iter().any(|&t| t == "refiner" || t == "refinery") {
+            "refiner".to_string()
+        } else if tokens.iter().any(|&t| t == "hauler" || t == "cargo") {
+            "hauler".to_string()
+        } else if tokens.iter().any(|&t| t == "miner" || t == "mining") {
+            "miner".to_string()
+        } else if tokens.iter().any(|&t| t == "scout" || t == "probe") {
+            "scout".to_string()
+        } else {
+            return Err("No role specified in designation command".to_string());
+        };
+        
+        // Look for specific ship identifier (format: SHIP_ID-...)
+        let target_ship = tokens.iter()
+            .find(|&t| t.contains("-") && t.len() > 3)
+            .map(|s| s.to_uppercase());
+        
+        let goal_id = match &target_ship {
+            Some(ship) => format!("designate_{}_as_{}", ship.to_lowercase(), desired_role),
+            None => format!("designate_best_as_{}", desired_role),
+        };
+        
+        o_debug!("🎭 Parsing ship role goal: designate {:?} as {}", target_ship, desired_role);
+        
+        Ok(Box::new(ShipRoleGoal {
+            id: goal_id,
+            target_ship,
+            desired_role,
+            priority: GoalPriority::Override,
+            status: crate::goals::GoalStatus::Pending,
+        }))
     }
 }

@@ -95,3 +95,25 @@ pub struct RefuelTransaction {
 pub struct JettisonCargoData {
     pub cargo: crate::models::ShipCargo,
 }
+
+// Transfer structures
+#[derive(Debug, Deserialize)]
+pub struct TransferCargoData {
+    pub cargo: crate::models::ShipCargo,
+}
+
+// Refinery structures
+#[derive(Debug, Deserialize)]
+pub struct RefineData {
+    pub cargo: crate::models::ShipCargo,
+    pub cooldown: crate::models::ShipCooldown,
+    pub produced: Vec<RefineGood>,
+    pub consumed: Vec<RefineGood>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefineGood {
+    #[serde(rename = "tradeSymbol")]
+    pub trade_symbol: String,
+    pub units: i32,
+}

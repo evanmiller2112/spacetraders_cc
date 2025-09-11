@@ -13,6 +13,9 @@ pub mod navigation;
 pub mod shipyard_operations;
 pub mod task_planner;
 pub mod product_knowledge;
+pub mod ship_role_manager;
+pub mod contract_analyzer;
+pub mod iron_ore_miner;
 
 pub use ship::*;
 pub use mining::*;
@@ -27,3 +30,6 @@ pub use navigation::*;
 pub use shipyard_operations::*;
 pub use task_planner::*;
 pub use product_knowledge::*;
+pub use ship_role_manager::*;
+pub use contract_analyzer::*;
+pub use iron_ore_miner::*;

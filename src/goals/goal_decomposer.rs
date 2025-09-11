@@ -47,6 +47,8 @@ impl GoalDecomposer {
                 target_quantity: quantity,
                 priority: GoalPriority::Override,
                 status: crate::goals::GoalStatus::Pending,
+                survey_cache: crate::goals::SurveyCache::new(),
+                use_surveys: true, // Enable surveys for decomposed mining goals
             }));
             
             // Sub-goal 2: Transport and refine (the original goal, modified)
